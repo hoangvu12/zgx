@@ -57,6 +57,8 @@ mod list_focus_scroll;
 mod list_in_easing_box;
 #[path = "../list_in_scroll.rs"]
 mod list_in_scroll;
+#[path = "../list_key_field.rs"]
+mod list_key_field;
 #[path = "../list_tab_rows.rs"]
 mod list_tab_rows;
 #[path = "../list_thin_rows.rs"]
