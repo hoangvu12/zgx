@@ -1,0 +1,4 @@
+---
+section: changed
+---
+- **A translucent popup on Windows 11 blurs what is behind it** (zgx-desktop): a menu, popover or tooltip whose panel is translucent was its tint over what is behind it, sharp past its window. Its window now has the acrylic accent plain glass has, which blurs behind a window never activated (a system backdrop draws flat there), and is the panel's box alone, which DWM rounds and shadows: the panel's own shadow past it is cut. A popover with an arrow, a drag preview and an opaque panel keep zgx's own blur. Not with Transparency effects off, nor on Windows 10. `WindowCapabilities::popup_blur_behind` says whether a popup's glass blurs what is behind it (macOS, Windows 11, and where popups stay inside their window), so an app can draw its popups solid elsewhere instead of asking which system it is on.

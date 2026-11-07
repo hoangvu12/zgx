@@ -229,7 +229,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let capabilities = cx.window_info.capabilities.clone();
                     cx.tasks.spawn(async move {
                         zgx::timer::sleep(std::time::Duration::from_millis(500)).await;
-                        println!("BLUR behind={}", capabilities.get().blur_behind);
+                        let capabilities = capabilities.get();
+                        println!(
+                            "BLUR behind={} popups={}",
+                            capabilities.blur_behind, capabilities.popup_blur_behind
+                        );
                         open.set(true);
                     });
                 }
