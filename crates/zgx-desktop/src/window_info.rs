@@ -112,8 +112,10 @@ pub struct WindowCapabilities {
     pub native_fullscreen: bool,
     /// The system blurs what is behind a window with `glass`. False on Linux
     /// where the compositor has no protocol for it (GNOME, sway, Weston, and
-    /// X11, where zgx asks for none): glass there shows what is behind it
-    /// sharp, so an app may draw solid. A Wayland session's is read once.
+    /// X11, where zgx asks for none), or whose `ext-background-effect-v1`
+    /// says it can't blur now (blur turned off): glass there shows what is
+    /// behind it sharp, so an app may draw solid. A Wayland session's is
+    /// read once.
     pub blur_behind: bool,
 }
 /// A window going into or out of full screen, as AppKit animates it
