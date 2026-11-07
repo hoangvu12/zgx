@@ -498,19 +498,30 @@ title bar is pressed, on Escape and on a press outside it.
 A menu or popover that is one rounded panel gets DWM's rounded corners, rim
 and shadow, as Windows 11 frames its menus.
 
-Known gap: menus and popovers keep the theme's flat background, where Windows
-11's own menus are acrylic. DWM draws a system backdrop
-(`DWMSBT_TRANSIENTWINDOW`) only behind an activated window, and a flat colour
-behind one never activated; a popup must not take activation from its window,
-which keeps the keyboard. The undocumented `SetWindowCompositionAttribute`
-acrylic is not used for popups (only for a window's plain glass).
+On Windows 11 a popup whose panel is translucent (a menu's tint) is acrylic,
+as Windows 11's own menus are: its window has the accent plain glass has
+(`SetWindowCompositionAttribute`'s `ACCENT_ENABLE_ACRYLICBLURBEHIND`, its
+tint of alpha 1), which blurs whatever is behind it, the app's window, other
+apps and the desktop, and the panel's tint lies over it. A system backdrop
+(`DWMSBT_TRANSIENTWINDOW`) would not do: DWM draws it only behind an activated
+window, and a flat colour behind one never activated, and a popup must not
+take activation from its window, which keeps the keyboard. The accent's blur
+fills the window, so the window is the panel's box alone, which DWM rounds
+and shadows; the panel's own shadow past it is cut, and so is DWM's rim (the
+panel draws its own edge). DWM's corners are 8 or 4 pixels at 100%, so a panel
+rounded otherwise shows a sliver of blur, or loses one, at its corners. A
+popover with an arrow, a drag preview and an opaque panel have no accent. The
+blur can't fade: through a popup's fade it shows whole. With Transparency
+effects off, or on Windows 10 (whose blur would be square past a rounded
+panel's corners), popups have none. `WindowCapabilities::popup_blur_behind`
+says whether they have it, so an app can draw its popups solid where not.
 
-A popup's `backdrop_blur` blurs the app's own pixels: what its window last drew
-under the popup, copied into a texture of the popup's size while it shows
-(`GpuRenderer::set_backdrop`), and copied and drawn again when the window
-repaints under it. Where the popup reaches past its window, or over another
-popup, there is nothing of that window's to blur and what is behind it shows
-through its fill.
+Without the accent, a popup's `backdrop_blur` blurs the app's own pixels: what
+its window last drew under the popup, copied into a texture of the popup's
+size while it shows (`GpuRenderer::set_backdrop`), and copied and drawn again
+when the window repaints under it. Where the popup reaches past its window, or
+over another popup, there is nothing of that window's to blur and what is
+behind it shows through its fill.
 
 No popup window exists before the pointer first reaches something that opens
 one, and a closed one is kept hidden for the next: an app that never opens a
