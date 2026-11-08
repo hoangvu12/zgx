@@ -4042,6 +4042,8 @@ pub struct GpuRenderer {
     /// What a popup's backdrop filters blur in place of its own target, the
     /// size of it (`set_backdrop`).
     backdrop: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// A popup's panel whose shadows go undrawn (`set_unshadowed`).
+    unshadowed: Option<NodeId>,
     #[cfg(target_os = "macos")]
     native_surfaces: Option<native_surface::SurfaceCache>,
     /// The next present joins the Core Animation transaction that resized the layer.
@@ -4693,6 +4695,7 @@ impl GpuRenderer {
             #[cfg(target_os = "macos")]
             plane_wake: None,
             backdrop: None,
+            unshadowed: None,
             #[cfg(target_os = "macos")]
             zoom: 1.,
             #[cfg(target_os = "macos")]
@@ -7999,7 +8002,14 @@ impl GpuRenderer {
                                 }
                             }
                         } else {
-                            for shadow in style.shadows().iter().take(32) {
+                            // (None for a popup's panel its system shadows,
+                            // `set_unshadowed`.)
+                            let shown = if self.unshadowed == Some(item.id) {
+                                0
+                            } else {
+                                32
+                            };
+                            for shadow in style.shadows().iter().take(shown) {
                                 let core = bounds.expand(shadow.spread.max(0.));
                                 let core = Rect::new(
                                     core.x + shadow.offset.x,
