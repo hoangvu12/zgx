@@ -2301,7 +2301,8 @@ struct CanvasLabels {
     /// drawn as it was touches nothing, so a chart redrawn every frame
     /// costs what changed.
     nodes: Vec<(NodeId, crate::canvas::CanvasText)>,
-    /// Each line's clip, where one cuts it: the box holding it, and the clip.
+    /// Each line's clip, where one cuts it: the box holding it, and the
+    /// clip. Empty until a line is cut, as most canvases' never are.
     clips: Vec<Option<(NodeId, crate::canvas::TextClip)>>,
     size: (f32, f32),
     view: Option<crate::scene::CanvasView>,
@@ -2348,6 +2349,43 @@ impl CanvasLabels {
         // In and out of the group, a box of the canvas's size: the walk
         // stops there (`Scene::append_held`).
         let kept = texts.len().min(self.nodes.len());
+        if self.clips.is_empty() && clips.is_empty() {
+            // No line cut, now or before: each in the group.
+            for (gone, _) in self.nodes.drain(kept..) {
+                scene.remove_held(gone);
+            }
+            for (index, text) in texts.iter().enumerate() {
+                if self
+                    .nodes
+                    .get(index)
+                    .is_some_and(|(_, shown)| shown == text)
+                {
+                    continue;
+                }
+                let kind = NodeKind::Text {
+                    text: text.text.clone(),
+                    color: text.color,
+                    font_size: text.size,
+                };
+                let node = match self.nodes.get_mut(index) {
+                    Some((node, shown)) => {
+                        scene.set_kind(*node, kind);
+                        *shown = text.clone();
+                        *node
+                    }
+                    None => {
+                        let (node, _) = Self::make(scene, group, kind, None);
+                        self.nodes.push((node, text.clone()));
+                        node
+                    }
+                };
+                Self::place(scene, node, text, (0., 0.));
+            }
+            return;
+        }
+        if self.clips.len() < self.nodes.len() {
+            self.clips.resize(self.nodes.len(), None);
+        }
         for ((gone, _), clip) in self.nodes.drain(kept..).zip(self.clips.drain(kept..)) {
             scene.remove_held(clip.map_or(gone, |(cut, _)| cut));
         }
@@ -2396,20 +2434,30 @@ impl CanvasLabels {
                 }
                 at = (clip.rect.x, clip.rect.y);
             }
-            scene.set_font(node, text.font.clone());
-            let size = match (text.anchor, text.baseline) {
-                (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top) => (0., 0.),
-                _ => scene.measure_text_with_font(&text.text, text.size, None, &text.font),
-            };
-            let (x, y) = text.origin(size);
-            scene.set_transform(
-                node,
-                crate::scene::Transform {
-                    x: x - at.0,
-                    y: y - at.1,
-                },
-            );
+            Self::place(scene, node, text, at);
         }
+    }
+    /// A line's font and place, from `at` (its clip's corner, or the
+    /// canvas's).
+    fn place(
+        scene: &mut crate::scene::Scene,
+        node: NodeId,
+        text: &crate::canvas::CanvasText,
+        at: (f32, f32),
+    ) {
+        scene.set_font(node, text.font.clone());
+        let size = match (text.anchor, text.baseline) {
+            (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top) => (0., 0.),
+            _ => scene.measure_text_with_font(&text.text, text.size, None, &text.font),
+        };
+        let (x, y) = text.origin(size);
+        scene.set_transform(
+            node,
+            crate::scene::Transform {
+                x: x - at.0,
+                y: y - at.1,
+            },
+        );
     }
     /// A line's text node, in `group` or, cut by `clip`, in a box of its
     /// own there: the node, and its box.
@@ -2514,6 +2562,16 @@ impl CanvasLayers {
     ) {
         use std::sync::Arc;
         let texts = content.texts();
+        // The drawing, then its words over it (a chart's labels, a
+        // terminal's rows): one layer, nothing clipped, measured or
+        // allocated.
+        if content.texts_last() && self.layers.is_empty() {
+            if !texts.is_empty() || !self.labels.nodes.is_empty() {
+                self.labels.show(scene, root, texts, &[], size);
+            }
+            scene.set_kind(drawing, NodeKind::Canvas(Arc::new(content)));
+            return;
+        }
         let clips = content.text_clips();
         let clips_of = |range: &std::ops::Range<usize>| match clips.is_empty() {
             true => &[][..],
