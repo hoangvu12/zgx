@@ -191,7 +191,10 @@ fn off_frame(job: Job) {
 /// its text into its raster (`Canvas::raster_text`) shapes it with, as the
 /// window shapes its text nodes.
 #[derive(Clone, Default)]
-pub struct CanvasFonts(Arc<Mutex<(u64, Vec<(crate::text::FontData, bool)>)>>);
+pub struct CanvasFonts(Arc<Mutex<FontsGiven>>);
+/// How many fonts have been given, and each with whether it replaces its
+/// families' faces.
+type FontsGiven = (u64, Vec<(crate::text::FontData, bool)>);
 impl CanvasFonts {
     pub(crate) fn add(&self, font: &crate::text::FontData, replace: bool) {
         let mut held = self.0.lock().unwrap_or_else(|p| p.into_inner());
