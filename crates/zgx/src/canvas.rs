@@ -732,6 +732,30 @@ pub struct CanvasLayer {
 /// as all once did.
 const MAX_LAYERS: usize = 8;
 
+/// Where a canvas's texts fall among its commands, whether it clips, and
+/// the texts transformed: kept only once a command follows a text, a clip
+/// opens or a text is transformed.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct TextOrder {
+    /// How many commands came before the first text, and each later text
+    /// before which more had come (its index, and how many).
+    first_text_after: usize,
+    text_moves: Vec<(usize, usize)>,
+    /// Whether a clip was opened.
+    clipped: bool,
+    /// The texts drawn transformed (`Canvas::text_transformed`): their
+    /// indices, in order, and transforms.
+    transformed: Vec<(usize, Affine)>,
+}
+impl TextOrder {
+    /// How many commands came before the last text.
+    fn last_text_after(&self) -> usize {
+        self.text_moves
+            .last()
+            .map_or(self.first_text_after, |(_, after)| *after)
+    }
+}
+
 /// Equal command lists preserve pixels, uploads and retained layout.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Canvas {
@@ -739,19 +763,35 @@ pub struct Canvas {
     /// Beside the commands: `Draw` is public and exhaustive. Empty, it
     /// allocates nothing.
     text: Vec<CanvasText>,
-    /// Where the texts fall among the commands: how many came before the
-    /// first, and each later text before which more had come (its index,
-    /// and how many). Text drawn together, as most is, allocates nothing.
-    first_text_after: usize,
-    text_moves: Vec<(usize, usize)>,
-    /// The texts drawn transformed (`Canvas::text_transformed`): their
-    /// indices, in order, and transforms. Empty unless one is.
-    transformed: Vec<(usize, Affine)>,
+    /// None while every text comes after every command, nothing clips and
+    /// no text is transformed, as a chart's labels and a terminal's rows:
+    /// the canvas no larger than it was, and nothing allocated.
+    order: Option<Box<TextOrder>>,
 }
 impl Canvas {
     /// An empty canvas.
     pub fn new() -> Self {
         Self::default()
+    }
+    /// The texts' order, kept from now on: while there was none, every
+    /// text came after every command.
+    fn order(&mut self) -> &mut TextOrder {
+        let at = self.commands.len();
+        self.order.get_or_insert_with(|| {
+            Box::new(TextOrder {
+                first_text_after: at,
+                ..Default::default()
+            })
+        })
+    }
+    /// Add `command`, keeping the texts' order once it follows one.
+    fn push(&mut self, command: Draw) {
+        if matches!(command, Draw::Clip { .. }) {
+            self.order().clipped = true;
+        } else if !self.text.is_empty() && self.order.is_none() {
+            self.order();
+        }
+        self.commands.push(command);
     }
     /// Fill `path` with `brush`, by the nonzero rule.
     pub fn fill(&mut self, path: Path, brush: impl Into<Brush>) -> &mut Self {
@@ -759,7 +799,7 @@ impl Canvas {
     }
     /// Fill `path` with `brush`, by `rule`.
     pub fn fill_rule(&mut self, path: Path, brush: impl Into<Brush>, rule: FillRule) -> &mut Self {
-        self.commands.push(Draw::Fill {
+        self.push(Draw::Fill {
             path,
             brush: brush.into(),
             rule,
@@ -768,7 +808,7 @@ impl Canvas {
     }
     /// Stroke `path` with `brush` and `style`.
     pub fn stroke(&mut self, path: Path, brush: impl Into<Brush>, style: Stroke) -> &mut Self {
-        self.commands.push(Draw::Stroke {
+        self.push(Draw::Stroke {
             path,
             brush: brush.into(),
             style,
@@ -785,7 +825,7 @@ impl Canvas {
         radius: f32,
         opacity: f32,
     ) -> &mut Self {
-        self.commands.push(Draw::Image {
+        self.push(Draw::Image {
             image,
             rect,
             fit,
@@ -806,7 +846,7 @@ impl Canvas {
         blur: f32,
         spread: f32,
     ) -> &mut Self {
-        self.commands.push(Draw::Shadow {
+        self.push(Draw::Shadow {
             path,
             color,
             offset,
@@ -817,12 +857,12 @@ impl Canvas {
     }
     /// Clip the commands after this to `path` until `restore`.
     pub fn clip(&mut self, path: Path, rule: FillRule) -> &mut Self {
-        self.commands.push(Draw::Clip { path, rule });
+        self.push(Draw::Clip { path, rule });
         self
     }
     /// End the most recent clip.
     pub fn restore(&mut self) -> &mut Self {
-        self.commands.push(Draw::Restore);
+        self.push(Draw::Restore);
         self
     }
     /// The commands, in order.
@@ -833,11 +873,13 @@ impl Canvas {
     /// drawn after, cut by the clips open now (see [`Canvas::layers`] and
     /// [`Canvas::text_clips`]).
     pub fn text(&mut self, text: CanvasText) -> &mut Self {
-        let at = self.commands.len();
-        if self.text.is_empty() {
-            self.first_text_after = at;
-        } else if self.last_text_after() != at {
-            self.text_moves.push((self.text.len(), at));
+        let (at, index) = (self.commands.len(), self.text.len());
+        if let Some(order) = &mut self.order {
+            if index == 0 {
+                order.first_text_after = at;
+            } else if order.last_text_after() != at {
+                order.text_moves.push((index, at));
+            }
         }
         self.text.push(text);
         self
@@ -847,7 +889,8 @@ impl Canvas {
     /// mirrored or skewed with a shape drawn under the same transform.
     pub fn text_transformed(&mut self, text: CanvasText, transform: Affine) -> &mut Self {
         if transform != Affine::IDENTITY {
-            self.transformed.push((self.text.len(), transform));
+            let index = self.text.len();
+            self.order().transformed.push((index, transform));
         }
         self.text(text)
     }
@@ -858,39 +901,53 @@ impl Canvas {
     /// What the text at `index` is mapped by once placed: identity unless
     /// it was added with [`Canvas::text_transformed`].
     pub fn text_transform(&self, index: usize) -> Affine {
-        match self.transformed.binary_search_by_key(&index, |(at, _)| *at) {
-            Ok(found) => self.transformed[found].1,
+        let Some(order) = &self.order else {
+            return Affine::IDENTITY;
+        };
+        match order
+            .transformed
+            .binary_search_by_key(&index, |(at, _)| *at)
+        {
+            Ok(found) => order.transformed[found].1,
             Err(_) => Affine::IDENTITY,
         }
+    }
+    /// Whether a text was added transformed.
+    pub fn texts_transformed(&self) -> bool {
+        self.order
+            .as_ref()
+            .is_some_and(|order| !order.transformed.is_empty())
     }
     /// How many commands came before the text at `index`: where it falls
     /// among them.
     pub fn text_after(&self, index: usize) -> usize {
-        match self.text_moves.partition_point(|(at, _)| *at <= index) {
-            0 => self.first_text_after,
-            moved => self.text_moves[moved - 1].1,
+        let Some(order) = &self.order else {
+            return self.commands.len();
+        };
+        match order.text_moves.partition_point(|(at, _)| *at <= index) {
+            0 => order.first_text_after,
+            moved => order.text_moves[moved - 1].1,
         }
     }
-    /// How many commands came before the last text (or would before one
-    /// added now, past every command, if there is none).
-    fn last_text_after(&self) -> usize {
-        self.text_moves
-            .last()
-            .map_or(self.first_text_after, |(_, after)| *after)
+    /// Whether every text comes after every command, nothing clips and no
+    /// text is transformed: the drawing, then its words over it, as a
+    /// chart's labels and a terminal's rows are.
+    pub fn texts_last(&self) -> bool {
+        self.order.is_none()
     }
     /// How many commands came before each text, in order.
     fn texts_after(&self) -> impl Iterator<Item = usize> + '_ {
-        (0..self.text.len()).scan(0, |moved, index| {
-            if self
-                .text_moves
-                .get(*moved)
-                .is_some_and(|(at, _)| *at == index)
-            {
+        let (first, moves) = match &self.order {
+            Some(order) => (order.first_text_after, &order.text_moves[..]),
+            None => (self.commands.len(), &[][..]),
+        };
+        (0..self.text.len()).scan(0, move |moved, index| {
+            if moves.get(*moved).is_some_and(|(at, _)| *at == index) {
                 *moved += 1;
             }
             Some(match *moved {
-                0 => self.first_text_after,
-                moved => self.text_moves[moved - 1].1,
+                0 => first,
+                moved => moves[moved - 1].1,
             })
         })
     }
@@ -898,28 +955,44 @@ impl Canvas {
     /// kept apart (each item's, drawn again only when it changes).
     pub fn extend(&mut self, other: &Canvas) -> &mut Self {
         let (before, texts_before) = (self.commands.len(), self.text.len());
+        // Kept from before `other`'s commands, which follow these texts.
+        if texts_before > 0 && !other.commands.is_empty() {
+            self.order();
+        }
+        if other.order.as_ref().is_some_and(|order| order.clipped) {
+            self.order().clipped = true;
+        }
+        if other.texts_transformed() {
+            self.order();
+        }
         self.commands.extend_from_slice(&other.commands);
-        if !other.text.is_empty() {
-            let first = other.first_text_after + before;
-            if self.text.is_empty() {
-                self.first_text_after = first;
-            } else if self.last_text_after() != first {
-                self.text_moves.push((texts_before, first));
+        if !other.text.is_empty() && (self.order.is_some() || other.order.is_some()) {
+            let (first, moves) = match &other.order {
+                Some(order) => (order.first_text_after, &order.text_moves[..]),
+                None => (other.commands.len(), &[][..]),
+            };
+            let first = first + before;
+            let order = self.order();
+            if texts_before == 0 {
+                order.first_text_after = first;
+            } else if order.last_text_after() != first {
+                order.text_moves.push((texts_before, first));
             }
-            self.text_moves.extend(
-                other
-                    .text_moves
+            order.text_moves.extend(
+                moves
                     .iter()
                     .map(|(at, after)| (at + texts_before, after + before)),
             );
         }
+        if let (Some(order), Some(theirs)) = (&mut self.order, &other.order) {
+            order.transformed.extend(
+                theirs
+                    .transformed
+                    .iter()
+                    .map(|(at, transform)| (at + texts_before, *transform)),
+            );
+        }
         self.text.extend_from_slice(&other.text);
-        self.transformed.extend(
-            other
-                .transformed
-                .iter()
-                .map(|(at, transform)| (at + texts_before, *transform)),
-        );
         self
     }
     /// Each text's clip, in order: the box its open clips leave (their
@@ -927,7 +1000,7 @@ impl Canvas {
     /// or a circle's. `None` where none is open; empty when the canvas
     /// clips nothing.
     pub fn text_clips(&self) -> Vec<Option<TextClip>> {
-        if self.text.is_empty() || !self.commands.iter().any(|c| matches!(c, Draw::Clip { .. })) {
+        if self.text.is_empty() || !self.order.as_ref().is_some_and(|order| order.clipped) {
             return Vec::new();
         }
         let mut clips = Vec::with_capacity(self.text.len());
@@ -981,7 +1054,7 @@ impl Canvas {
             commands: 0..self.commands.len(),
             texts: 0..self.text.len(),
         };
-        if self.text.is_empty() || self.first_text_after == self.commands.len() {
+        if self.text.is_empty() || self.text_after(0) == self.commands.len() {
             return vec![all()];
         }
         let mut layers = Vec::new();
@@ -1222,8 +1295,13 @@ mod tests {
         canvas.fill(square(50., 50.), red);
         assert_eq!(canvas.layers(size).len(), 1);
         assert_eq!(canvas.text_after(0), 1);
-        assert!(canvas.text_moves.is_empty(), "one place: nothing allocated");
-        assert!(canvas.text_moves.is_empty(), "one place: nothing allocated");
+        assert!(
+            canvas
+                .order
+                .as_ref()
+                .is_some_and(|o| o.text_moves.is_empty()),
+            "one place: no move kept"
+        );
         // One over it: a second layer, from that shape on.
         canvas.fill(square(15., 5.), red).text(label("b", 0., 30.));
         assert_eq!(
@@ -1376,7 +1454,11 @@ mod tests {
         item.text(text(0.))
             .text_transformed(text(1.), turned)
             .text_transformed(text(2.), Affine::IDENTITY);
-        assert_eq!(item.transformed.len(), 1, "identity is kept as none");
+        assert_eq!(
+            item.order.as_ref().map(|o| o.transformed.len()),
+            Some(1),
+            "identity is kept as none"
+        );
         let mut board = Canvas::new();
         board
             .text_transformed(text(9.), Affine::scale(2., 2.))
@@ -1390,6 +1472,12 @@ mod tests {
                 turned,
                 Affine::IDENTITY
             ]
+        );
+        let mut plain = Canvas::new();
+        plain.text_transformed(text(0.), Affine::IDENTITY);
+        assert!(
+            plain.texts_last(),
+            "an identity transform keeps the plain path"
         );
     }
 }
