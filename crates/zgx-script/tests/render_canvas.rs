@@ -159,3 +159,36 @@ fn a_size_must_be_given_and_over_zero() {
         );
     }
 }
+
+/// A canvas's pictures and shadows render too: `ui.render_canvas` draws
+/// with the canvas rasterizer that draws them in a window.
+#[test]
+fn pictures_and_shadows_render_as_in_a_window() {
+    const DRAWN: &str = r##"
+ui.task(function()
+    local white = ui.bitmap(4, 4, function() return 1 end)
+    local box = ui.path():rect(20, 0, 10, 10)
+    ui.invoke("drawn", ui.render_canvas(function(c)
+        c:rect(0, 0, 40, 20, "#000000")
+        c:image(white, 0, 0, 10, 10)
+        c:shadow(box, { color = "#ff0000" })
+    end, { width = 40, height = 20 }):await())
+end)
+return ui.div {}
+"##;
+    let heard: Heard = Rc::default();
+    let h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", DRAWN);
+        let heard = heard.clone();
+        host.action("drawn", move |value| {
+            heard.borrow_mut().push(("drawn".into(), value))
+        });
+        host
+    });
+    let (w, height, pixels) = decode(&wait(&h, &heard, "drawn"));
+    assert_eq!((w, height), (40, 20));
+    let at = |x: u32, y: u32| &pixels[((y * w + x) * 4) as usize..][..4];
+    assert_eq!(at(5, 5), &[255, 255, 255, 255], "the picture");
+    assert_eq!(at(25, 5), &[255, 0, 0, 255], "the shadow");
+    assert_eq!(at(15, 15), &[0, 0, 0, 255], "the ground between");
+}
