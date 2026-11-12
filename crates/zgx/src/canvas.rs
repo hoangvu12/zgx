@@ -744,6 +744,9 @@ pub struct Canvas {
     /// and how many). Text drawn together, as most is, allocates nothing.
     first_text_after: usize,
     text_moves: Vec<(usize, usize)>,
+    /// The texts drawn transformed (`Canvas::text_transformed`): their
+    /// indices, in order, and transforms. Empty unless one is.
+    transformed: Vec<(usize, Affine)>,
 }
 impl Canvas {
     /// An empty canvas.
@@ -839,9 +842,26 @@ impl Canvas {
         self.text.push(text);
         self
     }
+    /// Add a line of text laid out as [`Canvas::text`] places it, then
+    /// mapped by `transform` (in the canvas's coordinates): turned, scaled,
+    /// mirrored or skewed with a shape drawn under the same transform.
+    pub fn text_transformed(&mut self, text: CanvasText, transform: Affine) -> &mut Self {
+        if transform != Affine::IDENTITY {
+            self.transformed.push((self.text.len(), transform));
+        }
+        self.text(text)
+    }
     /// The canvas's lines of text.
     pub fn texts(&self) -> &[CanvasText] {
         &self.text
+    }
+    /// What the text at `index` is mapped by once placed: identity unless
+    /// it was added with [`Canvas::text_transformed`].
+    pub fn text_transform(&self, index: usize) -> Affine {
+        match self.transformed.binary_search_by_key(&index, |(at, _)| *at) {
+            Ok(found) => self.transformed[found].1,
+            Err(_) => Affine::IDENTITY,
+        }
     }
     /// How many commands came before the text at `index`: where it falls
     /// among them.
@@ -894,6 +914,12 @@ impl Canvas {
             );
         }
         self.text.extend_from_slice(&other.text);
+        self.transformed.extend(
+            other
+                .transformed
+                .iter()
+                .map(|(at, transform)| (at + texts_before, *transform)),
+        );
         self
     }
     /// Each text's clip, in order: the box its open clips leave (their
@@ -970,7 +996,9 @@ impl Canvas {
                 let text = &self.text[next_text];
                 let (width, height) = size(text);
                 let (x, y) = text.origin((width, height));
-                let area = Rect::new(x, y, width, height);
+                let area = self
+                    .text_transform(next_text)
+                    .bounds(Rect::new(x, y, width, height));
                 covered = Some(covered.map_or(area, |c| c.union(area)));
                 boxes.push(area);
                 next_text += 1;
@@ -1326,6 +1354,41 @@ mod tests {
                 // Nothing left.
                 clip(100., 100., 0., 0., 0.),
                 None,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_texts_transform_stays_with_it_when_drawings_join() {
+        let text = |x| CanvasText {
+            text: "a".into(),
+            x,
+            y: 0.,
+            size: 10.,
+            color: Color(0, 0, 0, 255),
+            font: Default::default(),
+            anchor: TextAnchor::Start,
+            baseline: TextBaseline::Top,
+            width: None,
+        };
+        let turned = Affine::rotation(1.);
+        let mut item = Canvas::new();
+        item.text(text(0.))
+            .text_transformed(text(1.), turned)
+            .text_transformed(text(2.), Affine::IDENTITY);
+        assert_eq!(item.transformed.len(), 1, "identity is kept as none");
+        let mut board = Canvas::new();
+        board
+            .text_transformed(text(9.), Affine::scale(2., 2.))
+            .extend(&item);
+        let transforms: Vec<Affine> = (0..4).map(|i| board.text_transform(i)).collect();
+        assert_eq!(
+            transforms,
+            [
+                Affine::scale(2., 2.),
+                Affine::IDENTITY,
+                turned,
+                Affine::IDENTITY
             ]
         );
     }

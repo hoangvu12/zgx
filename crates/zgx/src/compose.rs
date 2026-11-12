@@ -2293,6 +2293,8 @@ struct CanvasLabels {
     nodes: Vec<(NodeId, crate::canvas::CanvasText)>,
     /// Each line's clip, where one cuts it: the box holding it, and the clip.
     clips: Vec<Option<(NodeId, crate::canvas::TextClip)>>,
+    /// What each line is mapped by (`Canvas::text_transform`), as shown.
+    transforms: Vec<crate::affine::Affine>,
     size: (f32, f32),
     view: Option<crate::scene::CanvasView>,
 }
@@ -2303,6 +2305,7 @@ impl CanvasLabels {
         root: NodeId,
         texts: &[crate::canvas::CanvasText],
         clips: &[Option<crate::canvas::TextClip>],
+        transform: &dyn Fn(usize) -> crate::affine::Affine,
         (width, height): (f32, f32),
     ) {
         let group = match self.group {
@@ -2339,13 +2342,16 @@ impl CanvasLabels {
         for ((gone, _), clip) in self.nodes.drain(kept..).zip(self.clips.drain(kept..)) {
             scene.remove(clip.map_or(gone, |(cut, _)| cut));
         }
+        self.transforms.truncate(kept);
         for (index, text) in texts.iter().enumerate() {
             let clip = clips.get(index).copied().flatten();
+            let transform = transform(index);
             if self
                 .nodes
                 .get(index)
                 .is_some_and(|(_, shown)| shown == text)
                 && self.clips[index].map(|(_, shown)| shown) == clip
+                && self.transforms[index] == transform
             {
                 continue;
             }
@@ -2370,6 +2376,7 @@ impl CanvasLabels {
                 let (node, cut) = Self::make(scene, group, kind.clone(), style(), clip);
                 self.nodes[index].0 = node;
                 self.clips[index] = cut.map(|cut| (cut, clip.unwrap()));
+                self.transforms[index] = crate::affine::Affine::IDENTITY;
             }
             let node = match self.nodes.get_mut(index) {
                 Some((node, shown)) => {
@@ -2384,6 +2391,7 @@ impl CanvasLabels {
                     let (node, cut) = Self::make(scene, group, kind, style(), clip);
                     self.nodes.push((node, text.clone()));
                     self.clips.push(cut.map(|cut| (cut, clip.unwrap())));
+                    self.transforms.push(crate::affine::Affine::IDENTITY);
                     node
                 }
             };
@@ -2406,6 +2414,9 @@ impl CanvasLabels {
                 }
             };
             let (x, y) = text.origin(size);
+            // Turned (scaled, skewed) about its top left, which the
+            // transform moves.
+            let (x, y) = transform.point(x, y);
             scene.set_transform(
                 node,
                 crate::scene::Transform {
@@ -2413,6 +2424,10 @@ impl CanvasLabels {
                     y: y - at.1,
                 },
             );
+            if self.transforms[index] != transform {
+                self.transforms[index] = transform;
+                scene.set_local_transform(node, local_transform(transform));
+            }
         }
     }
     /// A line's text node, in `group` or, cut by `clip`, in a box of its
@@ -2488,6 +2503,31 @@ impl CanvasLabels {
     }
 }
 
+/// `transform`'s scale, skew and turn as a node's, about its top left (its
+/// translation left to the node's place): `LocalTransform::matrix` is
+/// rotate · skew · scale, so the skew is along x alone. A transform that
+/// flattens the text to a line scales it to nothing.
+fn local_transform(transform: crate::affine::Affine) -> crate::scene::LocalTransform {
+    let crate::affine::Affine { a, b, c, d, .. } = transform;
+    let across = a.hypot(b);
+    let det = a * d - b * c;
+    if !(across > 1e-6 && det.abs() > 1e-12) {
+        return crate::scene::LocalTransform {
+            scale: (0., 0.),
+            origin: (0., 0.),
+            ..crate::scene::LocalTransform::IDENTITY
+        };
+    }
+    let down = det / across;
+    crate::scene::LocalTransform {
+        scale: (across, down),
+        rotate: b.atan2(a),
+        skew: (((a * c + b * d) / (across * down)).atan(), 0.),
+        origin: (0., 0.),
+        ..crate::scene::LocalTransform::IDENTITY
+    }
+}
+
 /// A canvas's drawing in layers (`Canvas::layers`), where a shape drawn
 /// after a text covers it: the first layer's shapes in the canvas's own
 /// node with its text over them, and each further layer's shapes and text
@@ -2535,7 +2575,14 @@ impl CanvasLayers {
         };
         if layers.len() <= 1 {
             if !texts.is_empty() || !self.labels.nodes.is_empty() {
-                self.labels.show(scene, root, texts, &clips, size);
+                self.labels.show(
+                    scene,
+                    root,
+                    texts,
+                    &clips,
+                    &|index| content.text_transform(index),
+                    size,
+                );
             }
             self.keep(scene, 0);
             scene.set_kind(drawing, NodeKind::Canvas(Arc::new(content)));
@@ -2547,6 +2594,7 @@ impl CanvasLayers {
             root,
             &texts[first.texts.clone()],
             clips_of(&first.texts),
+            &|index| content.text_transform(first.texts.start + index),
             size,
         );
         let fills = crate::scene::Style {
@@ -2588,6 +2636,7 @@ impl CanvasLayers {
                 stack,
                 &texts[layer.texts.clone()],
                 clips_of(&layer.texts),
+                &|index| content.text_transform(layer.texts.start + index),
                 size,
             );
         }
