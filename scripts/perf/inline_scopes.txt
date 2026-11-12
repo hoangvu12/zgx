@@ -43,4 +43,4 @@ zgx-script	240	2678	to_lua
 zgx-script	171	1428	value::<impl in crates/zgx-script/src/value.rs>::reconcile
 zgx-script	174	1227	<impl in crates/zgx-script/src/lib.rs>::set_state
 zgx-script	107	1234	element::<impl in crates/zgx-script/src/element.rs>::flush
-zgx-script	361	2213	engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush
+zgx-script	361	2213	anime::engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush
