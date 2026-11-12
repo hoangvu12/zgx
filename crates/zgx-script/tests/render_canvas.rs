@@ -353,6 +353,40 @@ return ui.div {}
 }
 
 #[test]
+fn a_centred_paragraph_is_centred_on_its_point() {
+    let heard: Heard = Rc::default();
+    let h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r##"
+ui.task(function()
+    ui.invoke("rendered", ui.render_canvas(function(c)
+        c:text("Hi there", 600, 320, { size = 16, width = 160, align = "center", color = "#000000", line_height = 22, letter_spacing = 0.5, font = "Inter", weight = 600, baseline = "top" })
+    end, { width = 200, height = 60, x = 500, y = 300, scale = 2, background = "#ffffff" }):await())
+end)
+return ui.div {}
+"##,
+        );
+        let heard = heard.clone();
+        host.action("rendered", move |value| {
+            heard.borrow_mut().push(("rendered".into(), value))
+        });
+        host
+    });
+    let (w, h_px, pixels) = decode(&wait(&h, &heard, "rendered"));
+    let inked: Vec<u32> = (0..w)
+        .filter(|&x| (0..h_px).any(|y| pixels[((y * w + x) * 4) as usize] < 128))
+        .collect();
+    let (left, right) = (inked[0] as f32, *inked.last().unwrap() as f32 + 1.);
+    // Its point, 100 points into the picture, is 200 pixels in at 2x.
+    assert!(
+        ((left + right) / 2. - 200.).abs() <= 2.,
+        "ink {left}..{right}, centred on 200"
+    );
+}
+
+#[test]
 fn a_size_must_be_given_and_over_zero() {
     let runtime = zgx::reactive::Runtime::new();
     for (opts, key) in [
