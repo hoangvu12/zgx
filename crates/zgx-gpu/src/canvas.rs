@@ -647,7 +647,7 @@ pub fn picture(
         };
         let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
         let glyphs =
-            text.rasterize_scaled(&label.text, label.size, size.0, size.1, &label.font, zoom);
+            rasterize_scaled(text, &label.text, label.size, size.0, size.1, &label.font, zoom);
         let pixels = pixmap.pixels_mut();
         for (gx, gy, image) in glyphs {
             let gx = left + gx + image.placement.left;
@@ -699,6 +699,35 @@ pub fn picture(
         }
     }
     straight(pixmap)
+}
+/// `text` rasterized by `raster` at `scale` device pixels a point, each
+/// glyph placed as the GPU renderer places it (`styled_glyphs`: below 2x on
+/// whole pixels): its position and image in pixels.
+fn rasterize_scaled(
+    raster: &mut crate::text::CpuTextRaster,
+    text: &str,
+    size: f32,
+    width: f32,
+    height: f32,
+    font: &zgx::text_layout::FontStyle,
+    scale: f32,
+) -> Vec<(i32, i32, cosmic_text::SwashImage)> {
+    use crate::text::{glyph_image, set_buffer_text, wrap_width};
+    use cosmic_text::{Buffer, Metrics};
+    let (fonts, swash) = raster.parts();
+    let size = size.max(1.);
+    let mut buffer = Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
+    buffer.set_size(wrap_width(Some(width)), Some(height));
+    set_buffer_text(fonts, &mut buffer, text, font, size);
+    buffer.shape_until_scroll(fonts, false);
+    let glyphs = crate::styled_glyphs(Vec::new(), buffer.layout_runs(), scale, |_, _| 0);
+    glyphs
+        .into_iter()
+        .filter_map(|glyph| {
+            let image = glyph_image(swash, fonts, glyph.key)?;
+            Some((glyph.x as i32, glyph.y as i32, image))
+        })
+        .collect()
 }
 /// Where `label` lays out, as `CanvasLabels` places its text node: its
 /// box's top left and size. Its lines wrap at the box's width: a

@@ -5,7 +5,8 @@ use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 /// `key`'s glyph image: swash's, or for a face whose shapes swash can't
 /// draw (macOS 26's PingFang, `hvgl` only) Core Text's. Asked only where
 /// swash gave none: a glyph cache miss with nothing to show.
-pub(crate) fn glyph_image(
+#[doc(hidden)]
+pub fn glyph_image(
     swash: &mut cosmic_text::SwashCache,
     fonts: &mut FontSystem,
     key: cosmic_text::CacheKey,
@@ -122,7 +123,8 @@ fn font_features(settings: &[([u8; 4], u32)]) -> cosmic_text::FontFeatures {
 // Inlined where it is called, as it was before `spaced` took the rare part
 // out of it (LTO had stopped inlining it into the text cache).
 #[inline(always)]
-pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> {
+#[doc(hidden)]
+pub fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> {
     use zgx::text_layout::FontFamily;
     let family = match &font.family {
         FontFamily::SansSerif => Family::SansSerif,
@@ -937,31 +939,11 @@ impl CpuTextRaster {
         }
         images
     }
-    /// [`CpuTextRaster::rasterize`] at `scale` device pixels a point, each
-    /// glyph placed as the GPU renderer places it (`styled_glyphs`: below
-    /// 2x on whole pixels): its position and image in pixels.
-    pub fn rasterize_scaled(
-        &mut self,
-        text: &str,
-        size: f32,
-        width: f32,
-        height: f32,
-        font: &zgx::text_layout::FontStyle,
-        scale: f32,
-    ) -> Vec<(i32, i32, cosmic_text::SwashImage)> {
-        let size = size.max(1.);
-        let mut buffer = Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
-        buffer.set_size(wrap_width(Some(width)), Some(height));
-        set_buffer_text(&mut self.fonts, &mut buffer, text, font, size);
-        buffer.shape_until_scroll(&mut self.fonts, false);
-        let glyphs = crate::styled_glyphs(Vec::new(), buffer.layout_runs(), scale, |_, _| 0);
-        glyphs
-            .into_iter()
-            .filter_map(|glyph| {
-                let image = glyph_image(&mut self.swash, &mut self.fonts, glyph.key)?;
-                Some((glyph.x as i32, glyph.y as i32, image))
-            })
-            .collect()
+    /// Its fonts and glyph cache, for a renderer that places glyphs its own
+    /// way (zgx-gpu's canvas labels, as the GPU renderer places them).
+    #[doc(hidden)]
+    pub fn parts(&mut self) -> (&mut FontSystem, &mut cosmic_text::SwashCache) {
+        (&mut self.fonts, &mut self.swash)
     }
     /// The width and height `text` takes at `size` in `font`, wrapped at
     /// `width` if given, as a scene measures it
@@ -2143,7 +2125,7 @@ mod rich_tests {
             "zgx test regular",
         );
         renamed(
-            include_bytes!("../tests/fonts/Geist-500-subset.ttf"),
+            include_bytes!("../../zgx-gpu/tests/fonts/Geist-500-subset.ttf"),
             first_fallback,
         );
         let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
