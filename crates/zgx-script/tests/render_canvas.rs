@@ -139,11 +139,17 @@ fn measure_text_measures_as_a_window_does() {
     assert_eq!(width as f32, shown);
 }
 
-/// A platform whose app has its own font, as Zeron has Geist.
-struct WithFonts(Vec<std::sync::Arc<[u8]>>);
+/// A platform whose app has its own fonts, as Zeron has Geist, and keeps
+/// those a script adds (as zgx-desktop's `WindowFactory::add_font` does).
+struct WithFonts(RefCell<Vec<std::sync::Arc<[u8]>>>);
 impl zgx::platform::Platform for WithFonts {
     fn fonts(&self) -> Vec<std::sync::Arc<[u8]>> {
-        self.0.clone()
+        self.0.borrow().clone()
+    }
+    fn add_font(&self, bytes: std::sync::Arc<[u8]>) -> Result<Vec<String>, String> {
+        let font = zgx_gpu::text::FontData::new(bytes.clone())?;
+        self.0.borrow_mut().push(bytes);
+        Ok(font.families().to_vec())
     }
     fn clipboard_text(&self) -> Option<String> {
         None
@@ -198,7 +204,7 @@ return ui.div {}
             host
         },
         |view| {
-            let fonts = WithFonts(vec![GEIST.into()]);
+            let fonts = WithFonts(RefCell::new(vec![GEIST.into()]));
             zgx::compose::provide(zgx::platform::PlatformService(Rc::new(fonts)), view)
         },
     );
@@ -232,6 +238,118 @@ return ui.div {}
         .unwrap() as f32
         + 1.;
     assert!((right - geist).abs() <= 2., "ink to {right}, Geist {geist}");
+}
+
+#[test]
+fn a_font_loaded_with_load_font_renders_too() {
+    let heard: Heard = Rc::default();
+    let sink = heard.clone();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../zgx-desktop/examples/support/fonts/GeistVariable.ttf"
+    )
+    .replace('\\', "/");
+    let h = Harness::wrapped(
+        move |runtime| {
+            let code = format!(
+                r##"
+ui.on_mount(function()
+    ui.task(function()
+        ui.load_font("{path}"):await()
+        ui.render_canvas(function(c)
+            ui.invoke("measured", (c:measure_text("{LINE}", {{ font = "Geist", size = 16 }})))
+        end, {{ width = 4, height = 4 }}):await()
+    end)
+end)
+return ui.div {{}}
+"##
+            );
+            let host = ScriptHost::inline(runtime, "app", &code);
+            let heard = sink.clone();
+            host.action("measured", move |value| {
+                heard.borrow_mut().push(("measured".into(), value))
+            });
+            host
+        },
+        |view| {
+            let fonts = WithFonts(RefCell::new(Vec::new()));
+            zgx::compose::provide(zgx::platform::PlatformService(Rc::new(fonts)), view)
+        },
+    );
+    let Value::Num(measured) = wait(&h, &heard, "measured") else {
+        panic!("not a width");
+    };
+    let services = zgx_gpu::TextServices::new();
+    let geist = zgx_gpu::text::FontData::new(GEIST).unwrap();
+    geist.install(&mut services.text_system().borrow_mut());
+    let mut scene = zgx::scene::Scene::new(1., 1.);
+    services.install(&mut scene);
+    let font = zgx::text_layout::FontStyle {
+        family: zgx::text_layout::FontFamily::Named("Geist".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        measured as f32,
+        scene.measure_text_with_font(LINE, 16., None, &font).0
+    );
+}
+
+#[test]
+fn a_paragraph_wraps_to_its_width_as_it_measures() {
+    let heard: Heard = Rc::default();
+    let h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r##"
+ui.task(function()
+    local opts = { size = 14, width = 100, color = "#000000" }
+    local text = string.rep("word ", 12)
+    ui.invoke("rendered", ui.render_canvas(function(c)
+        local w, h = c:measure_text(text, opts)
+        ui.invoke("measured", { w, h })
+        c:text(text, 0, 0, opts)
+    end, { width = 200, height = 200, background = "#ffffff" }):await())
+end)
+return ui.div {}
+"##,
+        );
+        for name in ["rendered", "measured"] {
+            let heard = heard.clone();
+            host.action(name, move |value| {
+                heard.borrow_mut().push((name.into(), value))
+            });
+        }
+        host
+    });
+    let measured = wait(&h, &heard, "measured");
+    let height = match &measured {
+        Value::List(size) => match size[1] {
+            Value::Num(h) => h as f32,
+            _ => panic!("{measured:?}"),
+        },
+        _ => panic!("{measured:?}"),
+    };
+    // What a window measures the paragraph at.
+    let mut scene = zgx::scene::Scene::new(1., 1.);
+    zgx_gpu::TextServices::new().install(&mut scene);
+    let (_, shown) =
+        scene.measure_text_with_font(&"word ".repeat(12), 14., Some(100.), &Default::default());
+    assert_eq!(height, shown);
+    assert!(height > 50., "several lines: {height}");
+    // Drawn as measured: ink within 100 points across, down its lines.
+    let (w, _, pixels) = decode(&wait(&h, &heard, "rendered"));
+    let ink: Vec<(u32, u32)> = (0..w)
+        .flat_map(|x| (0..200).map(move |y| (x, y)))
+        .filter(|&(x, y)| pixels[((y * w + x) * 4) as usize] < 128)
+        .collect();
+    let right = ink.iter().map(|p| p.0).max().unwrap() as f32;
+    let bottom = ink.iter().map(|p| p.1).max().unwrap() as f32;
+    assert!(right < 100., "ink to {right}, past the width");
+    assert!(
+        bottom > height - 20. && bottom < height,
+        "ink down to {bottom} of {height}"
+    );
 }
 
 #[test]

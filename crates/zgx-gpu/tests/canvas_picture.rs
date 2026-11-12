@@ -88,6 +88,7 @@ fn drawing() -> Canvas {
             font: Default::default(),
             anchor,
             baseline,
+            width: None,
         });
     }
     // The app's own font (registered as `Application::font` does), and a
@@ -105,8 +106,25 @@ fn drawing() -> Canvas {
             font,
             anchor,
             baseline: TextBaseline::Top,
+            width: None,
         });
     }
+    // A paragraph wrapped to 90 points, centred on (120, 37), its lines
+    // centred in its box (as `c:text` sets `align` from `anchor`).
+    c.text(CanvasText {
+        text: "Find your still point, a few minutes a day".into(),
+        x: 120.,
+        y: 37.,
+        size: 11.,
+        color: Color(10, 10, 10, 255),
+        font: zgx::text_layout::FontStyle {
+            align: zgx::text_layout::TextAlign::Center,
+            ..Default::default()
+        },
+        anchor: TextAnchor::Center,
+        baseline: TextBaseline::Middle,
+        width: Some(90.),
+    });
     c
 }
 
@@ -218,6 +236,7 @@ fn text_is_where_and_as_wide_as_the_canvas_puts_it() {
         font: Default::default(),
         anchor: TextAnchor::Center,
         baseline: TextBaseline::Middle,
+        width: None,
     });
     let (width, _) = text.measure("MMMM", 20., None, &Default::default());
     let picture =

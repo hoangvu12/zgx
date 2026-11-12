@@ -701,9 +701,12 @@ pub fn picture(
     straight(pixmap)
 }
 /// Where `label` lays out, as `CanvasLabels` places its text node: its
-/// box's top left and size. Its lines wrap at the box's width.
+/// box's top left and size. Its lines wrap at the box's width: a
+/// paragraph's (`width`), else the text's own.
 fn label_box(label: &CanvasText, text: &mut crate::text::CpuTextRaster) -> (f32, f32, (f32, f32)) {
-    let size = text.measure(&label.text, label.size, None, &label.font);
+    let wrap = label.width.filter(|w| w.is_finite() && *w > 0.);
+    let (width, height) = text.measure(&label.text, label.size, wrap, &label.font);
+    let size = (wrap.unwrap_or(width), height);
     let (x, y) = label.origin(size);
     (x, y, size)
 }
