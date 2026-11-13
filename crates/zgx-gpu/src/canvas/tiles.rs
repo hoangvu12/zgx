@@ -62,6 +62,18 @@ pub(super) struct Pyramid {
     /// only a few frames unshown (the tiles keep their pixels), as images'
     /// textures past their budget are drawn smaller.
     textured: HashMap<u64, u8>,
+    /// The raster it was promoted from, whose texture the renderer has:
+    /// shown where its level's tiles aren't yet, until unshown a while
+    /// (`textured`). Nothing is uploaded for it.
+    stand_in: Option<StandIn>,
+}
+/// A promoted raster standing in for its level's tiles: drawn under `view`,
+/// `region` of its device pixels, its texture keyed by `id`.
+#[derive(Clone, Copy)]
+struct StandIn {
+    view: View,
+    region: [i32; 4],
+    id: u64,
 }
 struct Level {
     /// The view it is drawn under.
@@ -74,10 +86,6 @@ struct Level {
 struct Tile {
     image: Arc<ImageData>,
     used: u64,
-    /// Drawn as a tile is: else cut from the raster it was promoted from
-    /// (what it held of it, antialiased a little at its edges), shown
-    /// until made again off the frame.
-    exact: bool,
 }
 type MadeTile = Result<ImageData, GpuError>;
 /// Tiles made off the frame, for the frame to take.
@@ -262,9 +270,29 @@ impl Pyramid {
         self.shown.iter().copied()
     }
     fn ids(&self) -> impl Iterator<Item = u64> + '_ {
-        self.levels
-            .iter()
+        (self.levels.iter())
             .flat_map(|level| level.tiles.values().map(|tile| tile.image.id()))
+            .chain(self.stand_in.map(|s| s.id))
+    }
+    /// Where its stand-in shows under `view` in a box at `scale`, if it
+    /// covers all of `cell` (in the box's device pixels).
+    fn stand_in_over(&self, view: View, scale: f32, cell: [f32; 4]) -> Option<(u64, Placement)> {
+        let s = self.stand_in.filter(|s| self.textured.contains_key(&s.id))?;
+        let k = view.scale / s.view.scale;
+        let (ox, oy) = (
+            (view.x - s.view.x * k) * scale,
+            (view.y - s.view.y * k) * scale,
+        );
+        let [x0, y0, x1, y1] = s.region.map(|v| v as f32);
+        // (Half a pixel's slack: a level's own cells are whole pixels.)
+        let covers = x0 * k + ox <= cell[0] + 0.5
+            && y0 * k + oy <= cell[1] + 0.5
+            && x1 * k + ox >= cell[2] - 0.5
+            && y1 * k + oy >= cell[3] - 0.5;
+        if !covers {
+            return None;
+        }
+        scaled_part(s.region, s.view, view, scale, cell).map(|p| (s.id, p))
     }
     fn cancel_all(&mut self) {
         for task in self.tasks.values() {
@@ -298,7 +326,6 @@ impl Pyramid {
                     let tile = Tile {
                         image: Arc::new(image),
                         used: clock,
-                        exact: true,
                     };
                     self.bytes += TILE_BYTES;
                     if let Some(old) = level.tiles.insert((task.key.1, task.key.2), tile) {
@@ -347,6 +374,22 @@ impl CanvasCache {
             false => ((left / each) as usize).clamp(1, 64),
         }
     }
+    /// Whether image `id` is `node`'s raster standing in for its tiles: its
+    /// texture is kept (`get_tiles` retires it once unshown a while).
+    pub fn stands_in(&self, node: NodeId, id: u64) -> bool {
+        (self.pyramids.get(&node))
+            .and_then(|p| p.stand_in)
+            .is_some_and(|s| s.id == id)
+    }
+    /// `node`'s stand-in has no texture after all (the renderer let it go):
+    /// it shows no more.
+    pub fn stand_in_lost(&mut self, node: NodeId) {
+        if let Some(p) = self.pyramids.get_mut(&node)
+            && let Some(s) = p.stand_in.take()
+        {
+            p.textured.remove(&s.id);
+        }
+    }
     /// Whether `node` is drawn in tiles (`get_tiles`).
     #[inline]
     pub fn tiled(&self, node: NodeId) -> bool {
@@ -368,10 +411,10 @@ impl CanvasCache {
             self.retired.extend(pyramid.ids());
         }
     }
-    /// `node`'s raster, panned past or zoomed from: cut into the tiles of
-    /// the level it is, to be drawn in tiles from now on (`get_tiles`).
-    /// Those it doesn't hold all of, away from its edges, show until made
-    /// again. What it gives back shows nothing.
+    /// `node`'s raster, panned past or zoomed from: to be drawn in tiles
+    /// from now on (`get_tiles`), the raster's texture standing in for its
+    /// level's until they are made (no texture uploaded for it on the
+    /// frame). What it gives back shows nothing.
     pub(super) fn promote(&mut self, node: NodeId, canvas: &Arc<Canvas>) -> (Raster, Placement) {
         let entry = self
             .entries
@@ -384,62 +427,24 @@ impl CanvasCache {
             uv: [0.; 4],
             scaled: false,
         };
-        let raster = entry.raster();
+        let raster = Raster {
+            id: entry.id,
+            pixels: None,
+        };
         let mut level = Level {
             view: entry.view,
             painted: [0; 4],
             tiles: HashMap::new(),
             used: self.clock,
         };
-        let mut bytes = 0;
-        if let (Some(panned), Some(pixels)) = (entry.panned, &entry.pixels) {
+        let mut stand_in = None;
+        if let Some(panned) = entry.panned {
             level.painted = panned.painted;
-            let [rx0, ry0, rx1, ry1] = panned.region;
-            let range = intersect(panned.painted, panned.region);
-            let [px0, py0, px1, py1] = panned.painted;
-            let inner = [
-                if rx0 > px0 { rx0 + MARGIN } else { rx0 },
-                if ry0 > py0 { ry0 + MARGIN } else { ry0 },
-                if rx1 < px1 { rx1 - MARGIN } else { rx1 },
-                if ry1 < py1 { ry1 - MARGIN } else { ry1 },
-            ];
-            if !is_empty(range) {
-                for j in div_floor(range[1], TILE)..div_ceil(range[3], TILE) {
-                    for i in div_floor(range[0], TILE)..div_ceil(range[2], TILE) {
-                        let at = region((i, j));
-                        let needed = intersect(at, panned.painted);
-                        // Exact if it holds all of what's painted there,
-                        // away from its edges (antialiased a little there).
-                        let [ix0, iy0, ix1, iy1] = inner;
-                        let exact = needed[0] >= ix0
-                            && needed[1] >= iy0
-                            && needed[2] <= ix1
-                            && needed[3] <= iy1;
-                        let both = intersect(at, panned.region);
-                        let mut out = vec![0u8; TILE_BYTES];
-                        let stride = pixels.width() as usize;
-                        let len = (both[2] - both[0]) as usize * 4;
-                        for y in both[1]..both[3] {
-                            let src = ((y - ry0) as usize * stride + (both[0] - rx0) as usize) * 4;
-                            let dst = ((y - at[1]) as usize * TILE as usize
-                                + (both[0] - at[0]) as usize)
-                                * 4;
-                            out[dst..dst + len].copy_from_slice(&pixels.pixels()[src..src + len]);
-                        }
-                        if let Ok(image) = ImageData::new(TILE as u32, TILE as u32, out) {
-                            level.tiles.insert(
-                                (i, j),
-                                Tile {
-                                    image: Arc::new(image),
-                                    used: self.clock,
-                                    exact,
-                                },
-                            );
-                            bytes += TILE_BYTES;
-                        }
-                    }
-                }
-            }
+            stand_in = Some(StandIn {
+                view: entry.view,
+                region: panned.region,
+                id: entry.id,
+            });
         }
         let shapes = painted_bounds(canvas);
         let words = text_bounds(canvas, &self.text);
@@ -461,9 +466,11 @@ impl CanvasCache {
             tasks: HashMap::new(),
             failed: Default::default(),
             landed: Arc::default(),
-            bytes,
+            bytes: 0,
             shown: Vec::new(),
-            textured: HashMap::new(),
+            // (Its texture kept while it is shown, and a while after.)
+            textured: stand_in.iter().map(|s| (s.id, 0)).collect(),
+            stand_in,
         };
         self.backdrops.entry(node).or_default();
         self.pyramids.insert(node, pyramid);
@@ -529,6 +536,9 @@ impl CanvasCache {
         if changed {
             p.cancel_all();
             self.retired.extend(p.ids());
+            if let Some(s) = p.stand_in.take() {
+                p.textured.remove(&s.id);
+            }
             p.levels.clear();
             p.bytes = 0;
             p.failed.clear();
@@ -652,7 +662,7 @@ impl CanvasCache {
             }
             for cell in cells.iter().chain(&ring) {
                 let key = (bits, cell.0, cell.1);
-                if level.tiles.get(cell).is_some_and(|t| t.exact) || p.failed.contains(&key) {
+                if level.tiles.contains_key(cell) || p.failed.contains(&key) {
                     continue;
                 }
                 let task = p.tasks.entry(key).or_insert_with(|| {
@@ -674,7 +684,7 @@ impl CanvasCache {
             let visible = wanted.len().min(
                 cells
                     .iter()
-                    .filter(|c| !level.tiles.get(c).is_some_and(|t| t.exact))
+                    .filter(|c| !level.tiles.contains_key(c))
                     .count(),
             );
             // Those no longer wanted, if not begun, go.
@@ -770,8 +780,6 @@ impl CanvasCache {
             {
                 fresh += usize::from(!p.textured.contains_key(&tile.image.id()));
                 tile.used = clock;
-                // (Cut from the raster before: shown until made again.)
-                awaiting |= !tile.exact;
                 let (x, y) = (c[0] as f32 / scale, c[1] as f32 / scale);
                 let w = ((c[2] - c[0]) as f32 / scale).min(width - x);
                 let h = ((c[3] - c[1]) as f32 / scale).min(height - y);
@@ -800,7 +808,22 @@ impl CanvasCache {
             let c = c.map(|v| v as f32);
             let c = [c[0], c[1], c[2].min(full[2]), c[3].min(full[3])];
             let mut covered = false;
-            for at in &others {
+            // The stand-in, among the others by how far its zoom is.
+            let stand_off = (p.stand_in)
+                .filter(|s| s.view.scale / view.scale <= FINEST)
+                .map(|s| (s.view.scale / view.scale).ln().abs());
+            let mut stand_tried = stand_off.is_none();
+            for at in others.iter().map(Some).chain([None]) {
+                if !stand_tried && at.is_none_or(|at| stand_off.is_some_and(|o| o <= (p.levels[*at].view.scale / view.scale).ln().abs())) {
+                    stand_tried = true;
+                    if let Some((id, placement)) = p.stand_in_over(view, scale, c) {
+                        p.shown.push(id);
+                        out.push((Raster { id, pixels: None }, placement));
+                        covered = true;
+                        break;
+                    }
+                }
+                let Some(at) = at else { break };
                 let level = &p.levels[*at];
                 let k = view.scale / level.view.scale;
                 let (ox, oy) = (
@@ -911,6 +934,9 @@ impl CanvasCache {
             }
             kept
         });
+        if p.stand_in.is_some_and(|s| !p.textured.contains_key(&s.id)) {
+            p.stand_in = None;
+        }
         self.pyramids.insert(node, p);
         Ok(awaiting)
     }

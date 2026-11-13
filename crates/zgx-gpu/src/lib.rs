@@ -13811,8 +13811,11 @@ impl GpuRenderer {
         quads: &mut Vec<Quad>,
         stats: &mut GpuStats,
     ) -> Result<(), GpuError> {
-        // Its raster's texture, if it had one, is not drawn now.
-        if let Some(old) = self.node_images.remove(&item.id) {
+        // Its raster's texture, if it had one, is not drawn now (but as its
+        // tiles' stand-in, which the cache retires).
+        if let Some(old) = self.node_images.remove(&item.id)
+            && !self.canvases.stands_in(item.id, old)
+        {
             self.images.remove(&old);
         }
         let fonts = self.context.inner.canvas_fonts.clone();
@@ -13840,7 +13843,11 @@ impl GpuRenderer {
         runs.clear();
         for (raster, placement) in shown {
             if !self.images.contains_key(&raster.id) {
-                let pixels = raster.pixels.expect("a tile keeps its pixels");
+                // A stand-in whose texture went (past the images' budget).
+                let Some(pixels) = raster.pixels else {
+                    self.canvases.stand_in_lost(item.id);
+                    continue;
+                };
                 let began = std::time::Instant::now();
                 self.upload_tile(&pixels)?;
                 self.canvases
