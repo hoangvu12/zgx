@@ -939,6 +939,13 @@ export type Response = {
 -- A file a dialog, a drop or the system gives (the web's `File`): `size` in
 -- bytes, `type` its media type by its extension ("image/png"; "" unknown).
 export type File = { path: string, name: string, size: number, type: string }
+-- `ui.zip(file)`: a .zip written into a file the user picked, an entry at a
+-- time (stored as given; names are relative paths). `close` comes after
+-- every `add`, in order, and only then is the file replaced.
+export type Zip = {
+	add: (self: Zip, name: string, data: string | { base64: string }) -> Promise<nil>,
+	close: (self: Zip) -> Promise<nil>,
+}
 export type FilePickerOptions = {
 	title: string?,
 	-- Where the dialog opens.
@@ -1427,7 +1434,9 @@ declare extern type Canvas with
 	function measure_text(self, text: string, opts: CanvasTextOptions?): (number, number)
 end
 -- `ui.render_canvas`'s picture: its size in points, pixels a point, the
--- drawing's point at its top left, and what is under it (transparent).
+-- drawing's point at its top left, what is under it (transparent), and the
+-- file: "png" (the default), "jpeg" (`quality` 1 to 100, 90 unless said;
+-- no transparency: laid over white) or "webp" (lossless).
 export type RenderCanvasOptions = {
 	width: number,
 	height: number,
@@ -1435,6 +1444,12 @@ export type RenderCanvasOptions = {
 	x: number?,
 	y: number?,
 	background: Color?,
+	format: ("png" | "jpeg" | "webp")?,
+	quality: number?,
+	-- A file the user picked (`ui.save_file`): the picture is written there,
+	-- with no pixels through the script and up to 256 MiB of them (not 32),
+	-- and the promise gives nil.
+	file: (File | string)?,
 }
 
 -- `ui.web(opts)`: a web page's controller. Its fields are tracked, so a
@@ -22108,13 +22123,18 @@ declare ui: {
 	read_file: (file: File | string, opts: { base64: boolean? }?) -> Promise<string>,
 	-- Write to a file the user picked (beside it, then over it): a string's
 	-- bytes as they are (any byte), or `{ base64 = … }`'s (a PNG).
-	write_file: (file: File | string, data: string | { base64: string }) -> Promise<nil>,
+	-- `append = true` adds them at its end instead, to write a big file in
+	-- parts: await each part before the next.
+	write_file: (file: File | string, data: string | { base64: string }, opts: { append: boolean? }?) -> Promise<nil>,
 	-- A TrueType or OpenType font file (a path from the script's directory,
 	-- a plugin's inside it, or a File the user picked), or a font's bytes in
 	-- base64 (`{ base64 = … }`), added to every window's text: a promise of
 	-- the family names it holds, which `font` then names. Text in those
 	-- families lays out and draws again in it.
 	load_font: (src: File | string | { base64: string }) -> Promise<{ string }>,
+	-- A .zip into a file the user picked (`ui.save_file`), one entry at a
+	-- time, so the whole archive is never held: see `Zip`.
+	zip: (file: File | string) -> Zip,
 	-- What the app was launched with after its script (`zgx-run app/
 	-- notes.txt` gives `{ "notes.txt" }`).
 	args: { string },
@@ -22185,7 +22205,7 @@ declare ui: {
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
 	-- `draw` as a canvas would show it, as a PNG in base64, with no window:
 	-- `width * scale` by `height * scale` pixels, `x`, `y` at its top left.
-	render_canvas: (draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<string>,
+	render_canvas: (draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<string?>,
 	-- Out from (`cx`, `cy`) to radius `r` (`ry` down, for an ellipse), the
 	-- last colour past it; `transform` ({ a, b, c, d, e, f }) maps it after.
 	radial: (cx: number, cy: number, r: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush,
