@@ -793,11 +793,21 @@ impl CanvasCache {
             if let std::collections::hash_map::Entry::Vacant(slot) = self.zooms.entry(node) {
                 let done: Arc<Mutex<Option<Made>>> = Arc::default();
                 let (filled, drawing) = (done.clone(), canvas.clone());
-                let text = self.text.clone();
+                // The thread's own rasterizer, in the same fonts: a frame
+                // drawing text meanwhile never waits on it.
+                let fonts = self
+                    .text
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .fonts
+                    .clone();
                 off_frame(Box::new(move || {
-                    let bounds = text_bounds(&drawing, &text);
+                    static TEXT: OnceLock<SharedText> = OnceLock::new();
+                    let text = TEXT.get_or_init(Default::default);
+                    text.lock().unwrap_or_else(|p| p.into_inner()).fonts = fonts;
+                    let bounds = text_bounds(&drawing, text);
                     let panned = panned_region(&drawing, view, size, scale, bounds);
-                    let made = rasterize_region(&drawing, view, scale, panned.region, None, &text)
+                    let made = rasterize_region(&drawing, view, scale, panned.region, None, text)
                         .map(|image| (panned, image));
                     *filled.lock().unwrap_or_else(|p| p.into_inner()) = Some(made);
                     zgx::image::wake_waiting();
