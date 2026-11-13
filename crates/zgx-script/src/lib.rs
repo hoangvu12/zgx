@@ -97,6 +97,7 @@ mod transform;
 mod value;
 mod variants;
 mod windows;
+mod zip;
 
 pub use bundle::{Bundle, BundleFile, build};
 pub use calls::{Body, Request, Response};
@@ -4403,6 +4404,7 @@ impl ScriptHost {
                 "remembered_folder",
                 "save_file",
                 "write_file",
+                "zip",
             ],
             move |lua, ui| {
                 folder::install(lua, ui, platform.clone(), folders, access)?;
