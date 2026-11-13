@@ -1633,6 +1633,9 @@ struct Inner {
     fetch_policy: fetch_policy::SharedPolicy,
     /// What each plugin may do beyond its sandbox (`grant`), by name.
     grants: RefCell<HashMap<String, Vec<Capability>>>,
+    /// Each plugin's heap where the app set its own (`plugin_memory`), by
+    /// name; the rest have `Limits::plugin_memory`.
+    plugin_memory: RefCell<HashMap<String, usize>>,
     /// What every plugin may do (`grant_all_plugins`), those loaded later
     /// too.
     all_plugins: RefCell<Vec<Capability>>,
@@ -1846,6 +1849,7 @@ impl ScriptHost {
             connector: Rc::default(),
             fetch_policy: Rc::default(),
             grants: RefCell::default(),
+            plugin_memory: RefCell::default(),
             all_plugins: RefCell::default(),
             managed: RefCell::default(),
             exposed_actions: Rc::default(),
@@ -2499,6 +2503,7 @@ impl ScriptHost {
         for old in managed.drain(..) {
             if let Script::Plugin { name, .. } = old {
                 grants.remove(&name);
+                self.0.plugin_memory.borrow_mut().remove(&name);
             }
         }
         for plugin in plugins {
@@ -2508,6 +2513,12 @@ impl ScriptHost {
                 path: plugin.entry,
             });
         }
+    }
+    /// Plugin `name`'s heap, in bytes, in place of `Limits::plugin_memory`
+    /// (a plugin whose manifest asks for more), from its next load. Set
+    /// after `set_plugins`, which forgets those of the plugins it replaces.
+    pub fn plugin_memory(&self, name: impl Into<String>, bytes: usize) {
+        self.0.plugin_memory.borrow_mut().insert(name.into(), bytes);
     }
     /// Let plugins bind, invoke and call host action `name` (`action`,
     /// `async_action`): all of them, or (`Some`) those granted
@@ -4257,7 +4268,8 @@ impl ScriptHost {
         let lua = Lua::new().clone();
         let limits = self.0.limits;
         let memory = if plugin {
-            limits.plugin_memory
+            let own = self.0.plugin_memory.borrow().get(&name).copied();
+            own.unwrap_or(limits.plugin_memory)
         } else {
             limits.memory
         };
