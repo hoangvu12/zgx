@@ -4772,6 +4772,9 @@ pub struct GpuRenderer {
     /// Canvas tiles' textures no tile draws now, with their bind groups and
     /// the frame they were let go (`upload_tile`).
     tile_textures: std::collections::VecDeque<(u64, wgpu::BindGroup, wgpu::Texture)>,
+    /// The tiles of the canvas being drawn: each's image, and where its
+    /// quads end (`canvas_tiles`).
+    tile_runs: Vec<(u64, u32)>,
     /// A frame went without a kept file's pixels, decoding, or a shader
     /// fill's pipeline, compiling (`take_images_awaited`).
     images_awaited: bool,
@@ -5545,6 +5548,7 @@ impl GpuRenderer {
             background: Color(0, 0, 0, 0),
             images: FxHashMap::default(),
             tile_textures: Default::default(),
+            tile_runs: Vec::new(),
             images_awaited: false,
             layer_incomplete: false,
             layer_glyph_too_large: (0., false),
@@ -9516,8 +9520,8 @@ impl GpuRenderer {
                 // its glyphs start and its selected glyphs (`gradient_text_quads`).
                 let mut gradient_text: Option<(u64, usize, Vec<Quad>)> = None;
                 // A canvas drawn in tiles: each tile's image and where its
-                // quads end (`canvas_tiles`).
-                let mut canvas_tiles: Option<Vec<(u64, u32)>> = None;
+                // quads end (`canvas_tiles`, in `tile_runs`).
+                let mut canvas_tiled = false;
                 match item.kind {
                     NodeKind::Canvas(canvas) => {
                         if bounds.width <= 0. || bounds.height <= 0. {
@@ -9563,9 +9567,8 @@ impl GpuRenderer {
                             canvas_clip = Some(bounds);
                             stats.canvas_quads += quads.len() - start as usize;
                         } else if self.canvases.tiled(item.id) {
-                            canvas_tiles = Some(
-                                self.canvas_tiles(&item, canvas, view, &mut quads, &mut stats)?,
-                            );
+                            self.canvas_tiles(&item, canvas, view, &mut quads, &mut stats)?;
+                            canvas_tiled = true;
                         } else {
                             let before = self.canvases.rasterizations();
                             let (width, height, scale) = (bounds.width, bounds.height, self.scale);
@@ -9608,9 +9611,8 @@ impl GpuRenderer {
                             }
                             // Panned past its raster or zoomed: in tiles now.
                             if self.canvases.tiled(item.id) {
-                                canvas_tiles = Some(
-                                    self.canvas_tiles(&item, canvas, view, &mut quads, &mut stats)?,
-                                );
+                                self.canvas_tiles(&item, canvas, view, &mut quads, &mut stats)?;
+                                canvas_tiled = true;
                             }
                         }
                     }
@@ -10836,22 +10838,8 @@ impl GpuRenderer {
                         push_gradient_text(&mut draws, &quads, &draw, runs, image);
                         continue;
                     }
-                    if let Some(runs) = canvas_tiles.filter(|runs| !runs.is_empty()) {
-                        // A draw a tile, each of its own image.
-                        let mut at = draw.start;
-                        for (image, end) in runs {
-                            let source = self.image_source(scene, item.id, image);
-                            let tile = Draw {
-                                start: at,
-                                end,
-                                bounds: quad_bounds(&quads[at as usize..end as usize]),
-                                source,
-                                ..draw.clone()
-                            };
-                            let split = self.split_shading;
-                            push_draw(&mut draws, &quads, tile, split, false, self.scale, None);
-                            at = end;
-                        }
+                    if canvas_tiled && !self.tile_runs.is_empty() {
+                        self.push_tile_draws(&mut draws, &quads, &draw, scene, item.id);
                         continue;
                     }
                     let split = self.split_shading;
@@ -13780,10 +13768,39 @@ impl GpuRenderer {
         self.retire_node_image(node, image.id());
         Ok(self.ensure_image(image, None, stats)?.then(|| image.id()))
     }
+    /// A canvas drawn in tiles (`canvas_tiles`): a draw a tile, each of its
+    /// own image, as `draw` would be. Out of line, as `canvas_tiles`.
+    #[cold]
+    #[inline(never)]
+    fn push_tile_draws(
+        &mut self,
+        draws: &mut Vec<Draw>,
+        quads: &[Quad],
+        draw: &Draw,
+        scene: &Scene,
+        node: NodeId,
+    ) {
+        let runs = std::mem::take(&mut self.tile_runs);
+        let mut at = draw.start;
+        for &(image, end) in &runs {
+            let source = self.image_source(scene, node, image);
+            let tile = Draw {
+                start: at,
+                end,
+                bounds: quad_bounds(&quads[at as usize..end as usize]),
+                source,
+                ..draw.clone()
+            };
+            let (split, scale) = (self.split_shading, self.scale);
+            push_draw(draws, quads, tile, split, false, scale, None);
+            at = end;
+        }
+        self.tile_runs = runs;
+    }
     /// `item`'s canvas drawn in tiles (`CanvasCache::get_tiles`): their
     /// quads pushed, each tile's texture uploaded if new; each tile's image
-    /// and where its quads end. Out of line: canvases not panned or zoomed
-    /// never come here.
+    /// and where its quads end into `tile_runs`. Out of line: canvases not
+    /// panned or zoomed never come here.
     #[cold]
     #[inline(never)]
     fn canvas_tiles(
@@ -13793,7 +13810,7 @@ impl GpuRenderer {
         view: zgx::scene::CanvasView,
         quads: &mut Vec<Quad>,
         stats: &mut GpuStats,
-    ) -> Result<Vec<(u64, u32)>, GpuError> {
+    ) -> Result<(), GpuError> {
         // Its raster's texture, if it had one, is not drawn now.
         if let Some(old) = self.node_images.remove(&item.id) {
             self.images.remove(&old);
@@ -13819,7 +13836,8 @@ impl GpuRenderer {
         // Drawn again as tiles land.
         self.images_awaited |= awaiting;
         self.retire_canvas_images();
-        let mut runs = Vec::with_capacity(shown.len());
+        let mut runs = std::mem::take(&mut self.tile_runs);
+        runs.clear();
         for (raster, placement) in shown {
             if !self.images.contains_key(&raster.id) {
                 let pixels = raster.pixels.expect("a tile keeps its pixels");
@@ -13842,7 +13860,8 @@ impl GpuRenderer {
             });
             runs.push((raster.id, quads.len() as u32));
         }
-        Ok(runs)
+        self.tile_runs = runs;
+        Ok(())
     }
     /// The textures of images the canvas cache no longer draws go; a tile's,
     /// with its bind group, is kept to be written again (`upload_tile`).
