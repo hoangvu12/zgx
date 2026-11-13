@@ -96,7 +96,8 @@ fn settled(
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let mut out = Vec::new();
-        let awaiting = (cache.get_tiles(node, canvas, view, W, H, scale, false, &mut out)).unwrap();
+        let awaiting =
+            (cache.get_tiles(node, canvas, view, W, H, scale, false, 0, &mut out)).unwrap();
         if !awaiting {
             return out;
         }
@@ -136,7 +137,7 @@ fn a_pan_past_the_raster_draws_tiles_off_the_frame_matching_the_raster() {
         assert!(cache.tiled(node));
         let mut out = Vec::new();
         let begun = Instant::now();
-        (cache.get_tiles(node, &canvas, panned, W, H, scale, false, &mut out)).unwrap();
+        (cache.get_tiles(node, &canvas, panned, W, H, scale, false, 0, &mut out)).unwrap();
         assert!(
             begun.elapsed() < Duration::from_millis(50),
             "nothing made on the frame"
@@ -171,7 +172,7 @@ fn a_zoom_shows_another_level_scaled_then_its_own_tiles_matching_its_raster() {
         .unwrap();
     assert!(cache.tiled(node));
     let mut out = Vec::new();
-    let awaiting = (cache.get_tiles(node, &canvas, zoomed, W, H, 1., false, &mut out)).unwrap();
+    let awaiting = (cache.get_tiles(node, &canvas, zoomed, W, H, 1., false, 0, &mut out)).unwrap();
     assert!(awaiting);
     assert!(
         out.iter().all(|(_, p)| p.scaled),
@@ -186,7 +187,7 @@ fn a_zoom_shows_another_level_scaled_then_its_own_tiles_matching_its_raster() {
     // Back at the first zoom: its level shown at once (what it lacks from
     // the raster it was cut from made off the frame).
     let mut out = Vec::new();
-    (cache.get_tiles(node, &canvas, first, W, H, 1., false, &mut out)).unwrap();
+    (cache.get_tiles(node, &canvas, first, W, H, 1., false, 0, &mut out)).unwrap();
     let out = settled(&mut cache, node, &canvas, first, 1.);
     assert!(same(
         &composed(&out, 1.),
@@ -210,7 +211,7 @@ fn a_changed_drawing_shows_at_once_and_tiles_keep_to_their_budget() {
     settled(&mut cache, node, &canvas, at, 2.);
     let changed = board(250);
     let mut out = Vec::new();
-    let awaiting = (cache.get_tiles(node, &changed, at, W, H, 2., false, &mut out)).unwrap();
+    let awaiting = (cache.get_tiles(node, &changed, at, W, H, 2., false, 0, &mut out)).unwrap();
     assert!(!awaiting, "a change is drawn before it shows");
     assert!(same(
         &composed(&out, 2.),

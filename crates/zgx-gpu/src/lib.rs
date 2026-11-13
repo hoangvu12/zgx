@@ -225,6 +225,8 @@ const VERTEX_BUDGET: usize = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 16_384;
 /// The bytes images' own textures may hold (`upload_image`).
 const IMAGE_TEXTURES: usize = 64 * 1024 * 1024;
+/// How many canvas tiles' textures are kept to be written again.
+const TILE_TEXTURES: usize = 64;
 /// What textures of images no node shows may hold until the window goes idle:
 /// a few windows' worth of pictures to scroll back to.
 const IMAGES_GONE_BYTES: usize = 32 * 1024 * 1024;
@@ -4767,6 +4769,9 @@ pub struct GpuRenderer {
     /// Image textures: each bound for the quads, its size in bytes, and,
     /// where the CPU wrote its texels, the texture (see `render_direct`).
     images: FxHashMap<u64, ImageTexture>,
+    /// Canvas tiles' textures no tile draws now, with their bind groups and
+    /// the frame they were let go (`upload_tile`).
+    tile_textures: std::collections::VecDeque<(u64, wgpu::BindGroup, wgpu::Texture)>,
     /// A frame went without a kept file's pixels, decoding, or a shader
     /// fill's pipeline, compiling (`take_images_awaited`).
     images_awaited: bool,
@@ -5539,6 +5544,7 @@ impl GpuRenderer {
             blurred: None,
             background: Color(0, 0, 0, 0),
             images: FxHashMap::default(),
+            tile_textures: Default::default(),
             images_awaited: false,
             layer_incomplete: false,
             layer_glyph_too_large: (0., false),
@@ -6775,9 +6781,7 @@ impl GpuRenderer {
             }
         }
         self.canvases.retain(scene);
-        for id in self.canvases.take_retired() {
-            self.images.remove(&id);
-        }
+        self.retire_canvas_images();
         // Pixelated images' bind groups go with their textures; with the last, all.
         if let Some(nearest) = &mut self.nearest {
             nearest.binds.retain(|id, _| self.images.contains_key(id));
@@ -13808,21 +13812,21 @@ impl GpuRenderer {
             bounds.height,
             self.scale,
             wait,
+            self.image_frame,
             &mut shown,
         )?;
         stats.canvas_rasterizations += (self.canvases.rasterizations() - before) as usize;
         // Drawn again as tiles land.
         self.images_awaited |= awaiting;
-        for id in self.canvases.take_retired() {
-            self.images.remove(&id);
-        }
+        self.retire_canvas_images();
         let mut runs = Vec::with_capacity(shown.len());
         for (raster, placement) in shown {
             if !self.images.contains_key(&raster.id) {
                 let pixels = raster.pixels.expect("a tile keeps its pixels");
                 let began = std::time::Instant::now();
-                self.upload_image(&pixels)?;
-                self.canvases.tile_uploaded(began.elapsed());
+                self.upload_tile(&pixels)?;
+                self.canvases
+                    .tile_uploaded(self.image_frame, began.elapsed());
                 stats.image_uploads += 1;
             }
             let canvas::Placement { rect, uv, .. } = placement;
@@ -13839,6 +13843,53 @@ impl GpuRenderer {
             runs.push((raster.id, quads.len() as u32));
         }
         Ok(runs)
+    }
+    /// The textures of images the canvas cache no longer draws go; a tile's,
+    /// with its bind group, is kept to be written again (`upload_tile`).
+    fn retire_canvas_images(&mut self) {
+        for id in self.canvases.take_retired() {
+            let Some((bind, _, texture, _)) = self.images.remove(&id) else {
+                continue;
+            };
+            self.image_drawn.remove(&id);
+            self.image_holders.remove(&id);
+            if let Some(texture) = texture.filter(|t| (t.width(), t.height()) == canvas::TILE_SIZE)
+                && self.tile_textures.len() < TILE_TEXTURES
+            {
+                self.tile_textures
+                    .push_back((self.image_frame, bind, texture));
+            }
+        }
+    }
+    /// A canvas tile's texture: one a tile no longer drawn had, written
+    /// again (no texture or bind group made: those take milliseconds now
+    /// and then), once no frame in flight may still sample it; else made.
+    fn upload_tile(&mut self, image: &zgx::image::ImageData) -> Result<(), GpuError> {
+        let frame = self.image_frame;
+        let free = (self.tile_textures.front())
+            .is_some_and(|(at, ..)| frame >= at + 3)
+            .then(|| self.tile_textures.pop_front())
+            .flatten();
+        let Some((_, bind, texture)) = free.filter(|_| {
+            (image.width(), image.height()) == canvas::TILE_SIZE
+                && image.gpu_frame().is_none()
+                && !image.keeps_file()
+        }) else {
+            return self.upload_image(image);
+        };
+        let mut pixels = image.pixels().to_vec();
+        if !image.is_premultiplied() {
+            premultiply(&mut pixels);
+        }
+        let (width, height) = canvas::TILE_SIZE;
+        self.write_texels(&texture, (0, 0, width, height), &mut pixels);
+        let bytes = (width * height * 4) as usize;
+        self.images_outgoing.remove(&image.id());
+        self.images
+            .insert(image.id(), (bind, bytes, Some(texture), (0, 0)));
+        self.image_holders.insert(image.id(), image.holders());
+        self.image_drawn.insert(image.id(), frame);
+        Ok(())
     }
     /// The texture of `node`'s canvas raster, uploaded if it is new; the
     /// cache then keeps no pixels. A lost texture rasterizes again.

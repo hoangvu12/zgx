@@ -12,6 +12,7 @@ use zgx::{
     scene::{NodeId, NodeKind, Scene},
 };
 mod tiles;
+pub use tiles::TILE_SIZE;
 const BUDGET: usize = 32 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1024;
 struct Entry {
@@ -701,8 +702,9 @@ pub struct CanvasCache {
     pyramids: HashMap<NodeId, tiles::Pyramid>,
     /// Images it no longer draws, whose textures go (`take_retired`).
     retired: Vec<u64>,
-    /// What uploading a tile's texture takes, in ms (`tile_uploaded`).
-    upload_ms: f32,
+    /// What uploading a tile's texture takes, in ms, and the frame whose
+    /// uploads it last counted, with the ms they took (`tile_uploaded`).
+    uploads: (f32, u64, f32),
 }
 impl CanvasCache {
     /// Draw the text of canvases that draw it into their raster

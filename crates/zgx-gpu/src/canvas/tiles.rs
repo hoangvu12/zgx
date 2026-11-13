@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 pub(super) const ENABLED: bool = true;
 /// A tile's side, in device pixels.
 const TILE: i32 = 256;
+/// A tile's size in device pixels: its texture's (kept to be written
+/// again by the renderer).
+pub const TILE_SIZE: (u32, u32) = (TILE as u32, TILE as u32);
 /// What a tile is drawn with beyond its edges, and cut away.
 const MARGIN: i32 = 16;
 const TILE_BYTES: usize = (TILE * TILE * 4) as usize;
@@ -317,24 +320,32 @@ impl Drop for Pyramid {
     }
 }
 impl CanvasCache {
-    /// A tile's texture took `took` to upload: what a frame's budget
-    /// counts on (an average of the last few).
-    pub fn tile_uploaded(&mut self, took: Duration) {
+    /// A tile's texture took `took` to upload in frame `frame` (the
+    /// renderer's count): what the frame's budget has left, and what the
+    /// next count on (an average of the last few).
+    pub fn tile_uploaded(&mut self, frame: u64, took: Duration) {
         let ms = took.as_secs_f32() * 1e3;
-        self.upload_ms = match self.upload_ms {
+        self.uploads.0 = match self.uploads.0 {
             0. => ms,
             was => was * 0.8 + ms * 0.2,
         };
+        match self.uploads.1 == frame {
+            true => self.uploads.2 += ms,
+            false => (self.uploads.1, self.uploads.2) = (frame, ms),
+        }
     }
-    /// How many new tiles' textures a frame uploads: those that fit in
-    /// its budget, at least one.
-    fn tile_uploads(&self) -> usize {
-        let each = if self.upload_ms > 0. {
-            self.upload_ms
-        } else {
-            1.
-        };
-        ((UPLOAD_BUDGET.as_secs_f32() * 1e3 / each) as usize).clamp(1, 64)
+    /// How many new tiles' textures frame `frame` uploads still: those that
+    /// fit in what its budget has left (a canvas may be drawn more than
+    /// once a frame), at least one if it has spent none.
+    fn tile_uploads(&self, frame: u64) -> usize {
+        let (each, at, spent) = self.uploads;
+        let each = if each > 0. { each } else { 1. };
+        let spent = if at == frame { spent } else { 0. };
+        let left = UPLOAD_BUDGET.as_secs_f32() * 1e3 - spent;
+        match spent > 0. {
+            true => (left.max(0.) / each) as usize,
+            false => ((left / each) as usize).clamp(1, 64),
+        }
     }
     /// Whether `node` is drawn in tiles (`get_tiles`).
     #[inline]
@@ -463,7 +474,8 @@ impl CanvasCache {
     /// image, into `out`. `true`: some shows scaled or not at all while
     /// tiles are made off the frame (the host is woken as they land).
     /// `wait`, or a change to the drawing, makes those that show at once
-    /// (on the tile threads and this one), as a box's raster is.
+    /// (on the tile threads and this one), as a box's raster is. `frame`:
+    /// the renderer's frame count, for its upload budget (`tile_uploaded`).
     #[allow(clippy::too_many_arguments)]
     pub fn get_tiles(
         &mut self,
@@ -474,6 +486,7 @@ impl CanvasCache {
         height: f32,
         scale: f32,
         wait: bool,
+        frame: u64,
         out: &mut Vec<(Raster, Placement)>,
     ) -> Result<bool, GpuError> {
         if ![width, height, scale, view.x, view.y, view.scale]
@@ -732,7 +745,7 @@ impl CanvasCache {
         let mut fresh = 0;
         let most = match wait || changed {
             true => usize::MAX,
-            false => self.tile_uploads(),
+            false => self.tile_uploads(frame),
         };
         let ready = |textured: &HashMap<u64, u8>, fresh: usize, id: u64| {
             textured.contains_key(&id) || fresh < most
