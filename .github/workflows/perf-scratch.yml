@@ -3,13 +3,13 @@
 name: perf-scratch
 on:
   push:
-    branches: [perf-k3]
+    branches: [perf-k4]
   workflow_dispatch:
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   CARGO_INCREMENTAL: "0"
-  BASE: ad1793c17dc23a88a42569c1f91d8d00c1f93c21
+  BASE: 6d3a20fdfe9b40c8c76b785156af4c9d9c04fc82
   ONLY: "^(terminal|app-|spans-|pointer-move$|mount$|widgets$|canvas)"
 jobs:
   gate:
