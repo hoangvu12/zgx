@@ -230,7 +230,7 @@ const TILE_TEXTURES: usize = 64;
 /// The canvas tile atlas's entry in `GpuRenderer::images` (`TileAtlas`).
 const TILE_ATLAS: u64 = u64::MAX - 1;
 /// The tile atlas's slots a side.
-const ATLAS_SLOTS: u32 = 12;
+const ATLAS_SLOTS: u32 = 14;
 /// A slot's side: a tile and a texel of its edge about it, so a tile
 /// sampled at its edge takes nothing of its neighbour's.
 const ATLAS_SLOT: u32 = canvas::TILE_SIZE.0 + 2;
@@ -13922,6 +13922,10 @@ impl GpuRenderer {
                 stats.image_uploads += 1;
             }
             let canvas::Placement { rect, uv, .. } = placement;
+            // (Uploaded ahead of being shown: a backdrop's piece.)
+            if rect[2] <= 0. || rect[3] <= 0. {
+                continue;
+            }
             let (image, uv) = match slot {
                 Some(slot) => (TILE_ATLAS, atlas_uv(slot, uv)),
                 None => (raster.id, uv),
