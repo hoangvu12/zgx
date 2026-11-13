@@ -211,7 +211,9 @@ type Boxes = Arc<[(f32, f32, (f32, f32))]>;
 #[derive(Default)]
 struct TextRaster {
     fonts: CanvasFonts,
-    loaded: Option<u64>,
+    /// The fonts it was made in, and how many had been given then: made
+    /// again when either changes (another window's context gives others).
+    loaded: Option<(CanvasFonts, u64)>,
     raster: Option<crate::text::CpuTextRaster>,
     boxes: HashMap<usize, (Weak<Canvas>, Boxes)>,
 }
@@ -222,7 +224,11 @@ impl TextRaster {
             let held = self.fonts.0.lock().unwrap_or_else(|p| p.into_inner());
             (held.0, held.1.clone())
         };
-        if self.raster.is_none() || self.loaded != Some(serial) {
+        let current = self
+            .loaded
+            .as_ref()
+            .is_some_and(|(made, at)| Arc::ptr_eq(&made.0, &self.fonts.0) && *at == serial);
+        if self.raster.is_none() || !current {
             let mut text = crate::text::CpuTextRaster::default();
             for (font, replace) in &fonts {
                 match replace {
@@ -231,7 +237,7 @@ impl TextRaster {
                 }
             }
             self.raster = Some(text);
-            self.loaded = Some(serial);
+            self.loaded = Some((self.fonts.clone(), serial));
             self.boxes.clear();
         }
         self.raster.as_mut().expect("made just now")
