@@ -25,6 +25,9 @@ const TILE_BUDGET: usize = 40 * 1024 * 1024;
 const MAX_LEVELS: usize = 6;
 /// How much finer a level may be and still stand in for the zoom shown.
 const FINEST: f32 = 4.;
+/// How many tiles' textures a frame uploads at most: a burst of tiles
+/// landed shows over a few frames (what stands in for them meanwhile).
+const UPLOADS: usize = 8;
 /// How many frames a tile's texture is kept unshown.
 const TEXTURE_FRAMES: u8 = 8;
 type View = zgx::scene::CanvasView;
@@ -705,6 +708,13 @@ impl CanvasCache {
         let off = |at: &usize| (p.levels[*at].view.scale / view.scale).ln().abs();
         others.sort_by(|a, b| off(a).total_cmp(&off(b)));
         let mut awaiting = false;
+        // Tiles shown with a texture, or to be uploaded this frame: few,
+        // but all of a change's (it shows at once, as a raster's does).
+        let mut fresh = 0;
+        let most = if wait || changed { usize::MAX } else { UPLOADS };
+        let ready = |textured: &HashMap<u64, u8>, fresh: usize, id: u64| {
+            textured.contains_key(&id) || fresh < most
+        };
         p.shown.clear();
         let full = [0., 0., width * scale, height * scale];
         for cell in &cells {
@@ -721,7 +731,9 @@ impl CanvasCache {
             }
             if let Some(cur) = current
                 && let Some(tile) = p.levels[cur].tiles.get_mut(cell)
+                && ready(&p.textured, fresh, tile.image.id())
             {
+                fresh += usize::from(!p.textured.contains_key(&tile.image.id()));
                 tile.used = clock;
                 // (Cut from the raster before: shown until made again.)
                 awaiting |= !tile.exact;
@@ -779,8 +791,9 @@ impl CanvasCache {
                 let range = (div_floor(f[1], TILE)..div_ceil(f[3], TILE)).flat_map(|j| {
                     (div_floor(f[0], TILE)..div_ceil(f[2], TILE)).map(move |i| (i, j))
                 });
-                let all = range.clone().all(|t| {
-                    level.tiles.contains_key(&t) || is_empty(intersect(region(t), level.painted))
+                let all = range.clone().all(|t| match level.tiles.get(&t) {
+                    Some(tile) => ready(&p.textured, fresh, tile.image.id()),
+                    None => is_empty(intersect(region(t), level.painted)),
                 });
                 if !all {
                     continue;
@@ -789,6 +802,7 @@ impl CanvasCache {
                     if let Some(tile) = level.tiles.get(&t)
                         && let Some(placement) = scaled_part(region(t), level.view, view, scale, c)
                     {
+                        fresh += usize::from(!p.textured.contains_key(&tile.image.id()));
                         p.shown.push(tile.image.id());
                         out.push((
                             Raster {
@@ -841,6 +855,10 @@ impl CanvasCache {
                 at += 1;
                 keep
             });
+        }
+        // Tiles left for the next frame's uploads: it comes at once.
+        if fresh >= most && awaiting {
+            wake_at(now);
         }
         // Textures of tiles unshown a while go (their pixels stay).
         let backdrop_id = backdrop.as_ref().map(|b| b.2.id());
