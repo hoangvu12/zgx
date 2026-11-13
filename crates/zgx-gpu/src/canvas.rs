@@ -1753,7 +1753,7 @@ fn label_box(label: &CanvasText, text: &mut crate::text::CpuTextRaster) -> (f32,
 #[cfg(feature = "jpeg")]
 pub fn jpeg(image: &ImageData, quality: u8) -> Result<Vec<u8>, GpuError> {
     let mut rgb = Vec::with_capacity(image.pixels().len() / 4 * 3);
-    for px in image.pixels().chunks_exact(4) {
+    for px in image.pixels().as_chunks::<4>().0 {
         let a = u32::from(px[3]);
         for &c in &px[..3] {
             rgb.push(((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8);
@@ -1761,7 +1761,12 @@ pub fn jpeg(image: &ImageData, quality: u8) -> Result<Vec<u8>, GpuError> {
     }
     let mut bytes = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality.clamp(1, 100))
-        .encode(&rgb, image.width(), image.height(), image::ExtendedColorType::Rgb8)
+        .encode(
+            &rgb,
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgb8,
+        )
         .map_err(|e| GpuError(e.to_string()))?;
     Ok(bytes)
 }
