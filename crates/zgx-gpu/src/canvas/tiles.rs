@@ -68,6 +68,10 @@ struct Level {
 struct Tile {
     image: Arc<ImageData>,
     used: u64,
+    /// Drawn as a tile is: else cut from the raster it was promoted from
+    /// (what it held of it, antialiased a little at its edges), shown
+    /// until made again off the frame.
+    exact: bool,
 }
 type MadeTile = Result<ImageData, GpuError>;
 /// Tiles made off the frame, for the frame to take.
@@ -288,6 +292,7 @@ impl Pyramid {
                     let tile = Tile {
                         image: Arc::new(image),
                         used: clock,
+                        exact: true,
                     };
                     self.bytes += TILE_BYTES;
                     if let Some(old) = level.tiles.insert((task.key.1, task.key.2), tile) {
@@ -331,8 +336,9 @@ impl CanvasCache {
         }
     }
     /// `node`'s raster, panned past or zoomed from: cut into the tiles of
-    /// the level it is (those it holds all of), to be drawn in tiles from
-    /// now on (`get_tiles`). What it gives back shows nothing.
+    /// the level it is, to be drawn in tiles from now on (`get_tiles`).
+    /// Those it doesn't hold all of, away from its edges, show until made
+    /// again. What it gives back shows nothing.
     pub(super) fn promote(&mut self, node: NodeId, canvas: &Arc<Canvas>) -> (Raster, Placement) {
         let entry = self
             .entries
@@ -369,13 +375,13 @@ impl CanvasCache {
                     for i in div_floor(range[0], TILE)..div_ceil(range[2], TILE) {
                         let at = region((i, j));
                         let needed = intersect(at, panned.painted);
-                        // Only those it holds all of that's painted, away
-                        // from its edges (antialiased a little otherwise).
+                        // Exact if it holds all of what's painted there,
+                        // away from its edges (antialiased a little there).
                         let [ix0, iy0, ix1, iy1] = inner;
-                        if needed[0] < ix0 || needed[1] < iy0 || needed[2] > ix1 || needed[3] > iy1
-                        {
-                            continue;
-                        }
+                        let exact = needed[0] >= ix0
+                            && needed[1] >= iy0
+                            && needed[2] <= ix1
+                            && needed[3] <= iy1;
                         let both = intersect(at, panned.region);
                         let mut out = vec![0u8; TILE_BYTES];
                         let stride = pixels.width() as usize;
@@ -393,6 +399,7 @@ impl CanvasCache {
                                 Tile {
                                     image: Arc::new(image),
                                     used: self.clock,
+                                    exact,
                                 },
                             );
                             bytes += TILE_BYTES;
@@ -610,7 +617,7 @@ impl CanvasCache {
             }
             for cell in cells.iter().chain(&ring) {
                 let key = (bits, cell.0, cell.1);
-                if level.tiles.contains_key(cell) || p.failed.contains(&key) {
+                if level.tiles.get(cell).is_some_and(|t| t.exact) || p.failed.contains(&key) {
                     continue;
                 }
                 let task = p.tasks.entry(key).or_insert_with(|| {
@@ -632,7 +639,7 @@ impl CanvasCache {
             let visible = wanted.len().min(
                 cells
                     .iter()
-                    .filter(|c| !level.tiles.contains_key(c))
+                    .filter(|c| !level.tiles.get(c).is_some_and(|t| t.exact))
                     .count(),
             );
             // Those no longer wanted, if not begun, go.
@@ -716,6 +723,8 @@ impl CanvasCache {
                 && let Some(tile) = p.levels[cur].tiles.get_mut(cell)
             {
                 tile.used = clock;
+                // (Cut from the raster before: shown until made again.)
+                awaiting |= !tile.exact;
                 let (x, y) = (c[0] as f32 / scale, c[1] as f32 / scale);
                 let w = ((c[2] - c[0]) as f32 / scale).min(width - x);
                 let h = ((c[3] - c[1]) as f32 / scale).min(height - y);

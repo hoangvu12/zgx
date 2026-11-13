@@ -76,35 +76,14 @@ fn raster(canvas: &Arc<Canvas>, drawn: View, shift: [i32; 2], scale: f32) -> Vec
     }
     pixels
 }
-/// Whether `a` and `b` are the same pixels, but for antialiasing rounded
-/// the other way here and there: tiny-skia's coverage depends a little on
-/// where a pixmap starts (as two strips' of the box's raster do).
+/// Whether `a` (tiles) and `b` (the raster) are the same pixels, but on
+/// drawn edges: tiny-skia's antialiasing depends a little on where a
+/// pixmap starts, and it cuts a curve where it leaves one, which flattens
+/// it a little differently (as two strips of the box's raster do). Away
+/// from edges, within 2.
 fn same(a: &[u8], b: &[u8], scale: f32) -> bool {
-    let premultiplied = |p: &[u8]| {
-        p[..3]
-            .iter()
-            .map(|c| *c as u32 * p[3] as u32 / 255)
-            .collect::<Vec<_>>()
-    };
-    let (mut count, mut most) = (0, 0);
-    for (x, y) in a.chunks(4).zip(b.chunks(4)) {
-        if x == y {
-            continue;
-        }
-        let (px, py) = (premultiplied(x), premultiplied(y));
-        let d = (px.iter().zip(&py).map(|(p, q)| p.abs_diff(*q)))
-            .chain([(x[3] as u32).abs_diff(y[3] as u32)])
-            .max()
-            .unwrap();
-        count += 1;
-        most = most.max(d);
-    }
-    let area = (W * scale).ceil() * (H * scale).ceil();
-    if count as f32 > area / 20_000. || most > 32 {
-        eprintln!("{count} pixels differ, by up to {most}");
-        return false;
-    }
-    true
+    let width = (W * scale).ceil() as usize;
+    alike(a, b, width)
 }
 /// Tiles until none is awaited.
 fn settled(
@@ -251,4 +230,119 @@ fn a_changed_drawing_shows_at_once_and_tiles_keep_to_their_budget() {
         !cache.take_retired().is_empty(),
         "evicted tiles' textures go"
     );
+}
+/// A gradient under a clip, ellipses and strokes: tiles as its raster.
+fn shaded_with(gradient: bool, clip: bool, ellipses: bool, strokes: bool) -> Arc<Canvas> {
+    let mut board = Canvas::new();
+    let stops = vec![
+        GradientStop {
+            offset: 0.,
+            color: Color(250, 240, 220, 255),
+        },
+        GradientStop {
+            offset: 1.,
+            color: Color(40, 60, 120, 255),
+        },
+    ];
+    if gradient {
+        board.fill(
+            Path::rectangle(Rect::new(0., 0., 400., 300.)),
+            Brush::linear(Point::new(0., 0.), Point::new(400., 300.), stops).unwrap(),
+        );
+    }
+    if clip {
+        board.clip(
+            Path::rounded_rect(Rect::new(30., 20., 300., 200.), 24.).unwrap(),
+            FillRule::Winding,
+        );
+    }
+    for i in 0..12 {
+        let at = i as f32 * 31.;
+        if ellipses {
+            board.fill(
+                Path::ellipse(Rect::new(at, at * 0.6, 70., 40.)).unwrap(),
+                Color(200, (i * 20) as u8, 40, 255),
+            );
+        }
+        if !strokes {
+            continue;
+        }
+        let mut curve = Path::builder();
+        curve.move_to(at, 250.).cubic_to(
+            Point::new(at + 20., 150.),
+            Point::new(at + 50., 290.),
+            Point::new(at + 80., 200.),
+        );
+        board.stroke(
+            curve.build().unwrap(),
+            Color(20, 20, 20, 255),
+            Stroke {
+                width: 3.,
+                ..Stroke::default()
+            },
+        );
+    }
+    if clip {
+        board.restore();
+    }
+    Arc::new(board)
+}
+fn shaded() -> Arc<Canvas> {
+    shaded_with(true, true, true, true)
+}
+#[test]
+fn a_shaded_board_zoomed_shows_its_raster() {
+    let canvas = shaded();
+    let node = node();
+    let mut cache = CanvasCache::default();
+    cache
+        .get_panned(node, &canvas, view(-10., -6., 1.5), W, H, 1.5, false)
+        .unwrap();
+    let zoomed = view(-40., -20., 2.);
+    cache
+        .get_panned(node, &canvas, zoomed, W, H, 1.5, false)
+        .unwrap();
+    let out = settled(&mut cache, node, &canvas, zoomed, 1.5);
+    assert!(same(
+        &composed(&out, 1.5),
+        &raster(&canvas, zoomed, [0, 0], 1.5),
+        1.5
+    ));
+}
+/// Whether `a` and `b`, images `width` pixels across, differ only on
+/// edges, each pixel by no more than `b` changes within two pixels of it
+/// (what antialiasing rounded the other way can make), and there in less
+/// than one pixel in 20.
+pub(crate) fn alike(a: &[u8], b: &[u8], width: usize) -> bool {
+    let height = a.len() / 4 / width;
+    let at = |image: &[u8], x: usize, y: usize, c: usize| image[(y * width + x) * 4 + c];
+    let (mut off, mut flat) = (0, 0);
+    for y in 0..height {
+        for x in 0..width {
+            let d = (0..4)
+                .map(|c| at(a, x, y, c).abs_diff(at(b, x, y, c)))
+                .max()
+                .unwrap();
+            if d <= 2 {
+                continue;
+            }
+            off += 1;
+            let contrast = (y.saturating_sub(2)..(y + 3).min(height))
+                .flat_map(|ny| (x.saturating_sub(2)..(x + 3).min(width)).map(move |nx| (nx, ny)))
+                .flat_map(|(nx, ny)| (0..4).map(move |c| (nx, ny, c)))
+                .map(|(nx, ny, c)| at(b, nx, ny, c).abs_diff(at(b, x, y, c)))
+                .max()
+                .unwrap();
+            // (The raster compared with is cut at the box's edge too.)
+            let border = x < 2 || y < 2 || x + 2 >= width || y + 2 >= height;
+            if d > contrast && !border {
+                flat += 1;
+            }
+        }
+    }
+    if flat > 0 || off * 20 > width * height {
+        eprintln!("{off} pixels differ, {flat} of them past their edge's contrast");
+        return false;
+    }
+    true
 }
