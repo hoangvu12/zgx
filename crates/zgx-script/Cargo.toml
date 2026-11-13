@@ -14,7 +14,7 @@ description = "Luau scripts that describe zgx component trees, with hot reload."
 
 [features]
 # Image formats (see zgx-gpu): all by default.
-default = ["components", "svg", "png", "jpeg", "gif", "cjk-thai-words"]
+default = ["components", "svg", "png", "jpeg", "gif", "webp", "cjk-thai-words"]
 # Test-only hooks in `zgx test` (none in a default build): a delay an
 # environment variable names, to land a signal in a window on purpose.
 test-hooks = []
@@ -41,6 +41,7 @@ gltf = ["scene3d", "zgx-3d/gltf"]
 svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
+webp = ["zgx-gpu/webp"]
 gif = ["zgx-gpu/gif"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]
