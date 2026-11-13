@@ -14008,6 +14008,12 @@ impl GpuRenderer {
                     .push_back((self.image_frame, bind, texture));
             }
         }
+        // (Kept while tiles are in it, the window at rest too: a texture of
+        // tiles shown again, not uploaded again past the frame's budget.)
+        if self.tile_atlas.as_ref().is_some_and(|a| a.slots.is_empty()) {
+            self.tile_atlas = None;
+            self.images.remove(&TILE_ATLAS);
+        }
     }
     /// A canvas tile's texture: one a tile no longer drawn had, written
     /// again (no texture or bind group made: those take milliseconds now
@@ -16603,10 +16609,6 @@ impl GpuRenderer {
         self.backdrops = FxHashMap::default();
         self.drop_unheld_shaders();
         self.images.remove(&effects::EFFECT_ATLAS);
-        // (Its tiles' are gone with it: drawn again, they upload again.)
-        if self.tile_atlas.take().is_some() {
-            self.images.remove(&TILE_ATLAS);
-        }
         for id in std::mem::take(&mut self.images_gone) {
             self.images.remove(&id);
             self.image_drawn.remove(&id);
