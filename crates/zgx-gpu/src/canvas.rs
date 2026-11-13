@@ -701,6 +701,8 @@ pub struct CanvasCache {
     pyramids: HashMap<NodeId, tiles::Pyramid>,
     /// Images it no longer draws, whose textures go (`take_retired`).
     retired: Vec<u64>,
+    /// What uploading a tile's texture takes, in ms (`tile_uploaded`).
+    upload_ms: f32,
 }
 impl CanvasCache {
     /// Draw the text of canvases that draw it into their raster

@@ -25,9 +25,9 @@ const TILE_BUDGET: usize = 40 * 1024 * 1024;
 const MAX_LEVELS: usize = 6;
 /// How much finer a level may be and still stand in for the zoom shown.
 const FINEST: f32 = 4.;
-/// How many tiles' textures a frame uploads at most: a burst of tiles
-/// landed shows over a few frames (what stands in for them meanwhile).
-const UPLOADS: usize = 8;
+/// How long a frame spends uploading tiles' textures, about: a burst of
+/// tiles landed shows over a few frames (what stands in for them meanwhile).
+const UPLOAD_BUDGET: Duration = Duration::from_millis(4);
 /// How many frames a tile's texture is kept unshown.
 const TEXTURE_FRAMES: u8 = 8;
 type View = zgx::scene::CanvasView;
@@ -317,6 +317,25 @@ impl Drop for Pyramid {
     }
 }
 impl CanvasCache {
+    /// A tile's texture took `took` to upload: what a frame's budget
+    /// counts on (an average of the last few).
+    pub fn tile_uploaded(&mut self, took: Duration) {
+        let ms = took.as_secs_f32() * 1e3;
+        self.upload_ms = match self.upload_ms {
+            0. => ms,
+            was => was * 0.8 + ms * 0.2,
+        };
+    }
+    /// How many new tiles' textures a frame uploads: those that fit in
+    /// its budget, at least one.
+    fn tile_uploads(&self) -> usize {
+        let each = if self.upload_ms > 0. {
+            self.upload_ms
+        } else {
+            1.
+        };
+        ((UPLOAD_BUDGET.as_secs_f32() * 1e3 / each) as usize).clamp(1, 64)
+    }
     /// Whether `node` is drawn in tiles (`get_tiles`).
     #[inline]
     pub fn tiled(&self, node: NodeId) -> bool {
@@ -711,7 +730,10 @@ impl CanvasCache {
         // Tiles shown with a texture, or to be uploaded this frame: few,
         // but all of a change's (it shows at once, as a raster's does).
         let mut fresh = 0;
-        let most = if wait || changed { usize::MAX } else { UPLOADS };
+        let most = match wait || changed {
+            true => usize::MAX,
+            false => self.tile_uploads(),
+        };
         let ready = |textured: &HashMap<u64, u8>, fresh: usize, id: u64| {
             textured.contains_key(&id) || fresh < most
         };

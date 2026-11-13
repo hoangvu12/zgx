@@ -13820,7 +13820,9 @@ impl GpuRenderer {
         for (raster, placement) in shown {
             if !self.images.contains_key(&raster.id) {
                 let pixels = raster.pixels.expect("a tile keeps its pixels");
+                let began = std::time::Instant::now();
                 self.upload_image(&pixels)?;
+                self.canvases.tile_uploaded(began.elapsed());
                 stats.image_uploads += 1;
             }
             let canvas::Placement { rect, uv, .. } = placement;
