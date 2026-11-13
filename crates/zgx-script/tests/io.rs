@@ -305,6 +305,7 @@ fn a_plugin_zips_only_with_files() {
     assert!(error.contains("Capability::Files"), "{error}");
 }
 
+#[test]
 fn a_file_is_written_in_parts_with_append() {
     let dir = dir("append");
     let mut h = app(&dir, APP, None);
