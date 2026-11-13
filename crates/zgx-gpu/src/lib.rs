@@ -6775,6 +6775,9 @@ impl GpuRenderer {
             }
         }
         self.canvases.retain(scene);
+        for id in self.canvases.take_retired() {
+            self.images.remove(&id);
+        }
         // Pixelated images' bind groups go with their textures; with the last, all.
         if let Some(nearest) = &mut self.nearest {
             nearest.binds.retain(|id, _| self.images.contains_key(id));
@@ -9508,6 +9511,9 @@ impl GpuRenderer {
                 // A gradient text in its own layer: its gradient's image, where
                 // its glyphs start and its selected glyphs (`gradient_text_quads`).
                 let mut gradient_text: Option<(u64, usize, Vec<Quad>)> = None;
+                // A canvas drawn in tiles: each tile's image and where its
+                // quads end (`canvas_tiles`).
+                let mut canvas_tiles: Option<Vec<(u64, u32)>> = None;
                 match item.kind {
                     NodeKind::Canvas(canvas) => {
                         if bounds.width <= 0. || bounds.height <= 0. {
@@ -9552,6 +9558,10 @@ impl GpuRenderer {
                             }
                             canvas_clip = Some(bounds);
                             stats.canvas_quads += quads.len() - start as usize;
+                        } else if self.canvases.tiled(item.id) {
+                            canvas_tiles = Some(
+                                self.canvas_tiles(&item, canvas, view, &mut quads, &mut stats)?,
+                            );
                         } else {
                             let before = self.canvases.rasterizations();
                             let (width, height, scale) = (bounds.width, bounds.height, self.scale);
@@ -9591,6 +9601,12 @@ impl GpuRenderer {
                                     border: [0.; 4],
                                     mask: NO_MASK,
                                 });
+                            }
+                            // Panned past its raster or zoomed: in tiles now.
+                            if self.canvases.tiled(item.id) {
+                                canvas_tiles = Some(
+                                    self.canvas_tiles(&item, canvas, view, &mut quads, &mut stats)?,
+                                );
                             }
                         }
                     }
@@ -10814,6 +10830,24 @@ impl GpuRenderer {
                     };
                     if let Some((image, runs)) = filled_runs {
                         push_gradient_text(&mut draws, &quads, &draw, runs, image);
+                        continue;
+                    }
+                    if let Some(runs) = canvas_tiles.filter(|runs| !runs.is_empty()) {
+                        // A draw a tile, each of its own image.
+                        let mut at = draw.start;
+                        for (image, end) in runs {
+                            let source = self.image_source(scene, item.id, image);
+                            let tile = Draw {
+                                start: at,
+                                end,
+                                bounds: quad_bounds(&quads[at as usize..end as usize]),
+                                source,
+                                ..draw.clone()
+                            };
+                            let split = self.split_shading;
+                            push_draw(&mut draws, &quads, tile, split, false, self.scale, None);
+                            at = end;
+                        }
                         continue;
                     }
                     let split = self.split_shading;
@@ -13741,6 +13775,68 @@ impl GpuRenderer {
         };
         self.retire_node_image(node, image.id());
         Ok(self.ensure_image(image, None, stats)?.then(|| image.id()))
+    }
+    /// `item`'s canvas drawn in tiles (`CanvasCache::get_tiles`): their
+    /// quads pushed, each tile's texture uploaded if new; each tile's image
+    /// and where its quads end. Out of line: canvases not panned or zoomed
+    /// never come here.
+    #[cold]
+    #[inline(never)]
+    fn canvas_tiles(
+        &mut self,
+        item: &zgx::scene::PaintItem<'_>,
+        canvas: &Arc<zgx::canvas::Canvas>,
+        view: zgx::scene::CanvasView,
+        quads: &mut Vec<Quad>,
+        stats: &mut GpuStats,
+    ) -> Result<Vec<(u64, u32)>, GpuError> {
+        // Its raster's texture, if it had one, is not drawn now.
+        if let Some(old) = self.node_images.remove(&item.id) {
+            self.images.remove(&old);
+        }
+        let fonts = self.context.inner.canvas_fonts.clone();
+        self.canvases.set_fonts(&fonts);
+        let wait = self.waits_for_shaders();
+        let bounds = item.bounds;
+        let before = self.canvases.rasterizations();
+        let mut shown = Vec::new();
+        let awaiting = self.canvases.get_tiles(
+            item.id,
+            canvas,
+            view,
+            bounds.width,
+            bounds.height,
+            self.scale,
+            wait,
+            &mut shown,
+        )?;
+        stats.canvas_rasterizations += (self.canvases.rasterizations() - before) as usize;
+        // Drawn again as tiles land.
+        self.images_awaited |= awaiting;
+        for id in self.canvases.take_retired() {
+            self.images.remove(&id);
+        }
+        let mut runs = Vec::with_capacity(shown.len());
+        for (raster, placement) in shown {
+            if !self.images.contains_key(&raster.id) {
+                let pixels = raster.pixels.expect("a tile keeps its pixels");
+                self.upload_image(&pixels)?;
+                stats.image_uploads += 1;
+            }
+            let canvas::Placement { rect, uv, .. } = placement;
+            quads.push(Quad {
+                rect: [bounds.x + rect[0], bounds.y + rect[1], rect[2], rect[3]],
+                uv,
+                color: [1., 1., 1., item.effects.opacity],
+                fade: [bounds.x, bounds.y, bounds.width, bounds.height],
+                options: [item.effects.edge_fade, 2., 0., 0.],
+                shape: [0.; 4],
+                border: [0.; 4],
+                mask: NO_MASK,
+            });
+            runs.push((raster.id, quads.len() as u32));
+        }
+        Ok(runs)
     }
     /// The texture of `node`'s canvas raster, uploaded if it is new; the
     /// cache then keeps no pixels. A lost texture rasterizes again.
