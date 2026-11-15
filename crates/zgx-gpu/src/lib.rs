@@ -6815,6 +6815,7 @@ impl GpuRenderer {
         }
         self.image_frame += 1;
         self.images_decoding = 0;
+        self.canvases.set_window(self.width, self.height);
         if self.images_to_share {
             self.share_images();
             self.images_awaiting.clear();
