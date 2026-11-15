@@ -351,6 +351,8 @@ pub fn unforwarded(wrap: impl FnOnce(PlatformService) -> PlatformService) -> Vec
     let _ = w.substitutions("", Substitutions::default());
     let _ = w.correction("", 0..0);
     w.set_text_language(None);
+    let _ = w.add_font(Arc::from(&[][..]));
+    let _ = w.fonts();
     let _ = w.looks_up();
     let _ = w.look_up("", (0., 0.), 0.);
     let _ = w.clipboard_files();
@@ -383,7 +385,7 @@ struct Probe {
 }
 impl Probe {
     /// Every `Platform` method, in the trait's order.
-    const METHODS: [&'static str; 29] = [
+    const METHODS: [&'static str; 31] = [
         "clipboard_text",
         "set_clipboard_text",
         "primary_text",
@@ -396,6 +398,8 @@ impl Probe {
         "substitutions",
         "correction",
         "set_text_language",
+        "add_font",
+        "fonts",
         "looks_up",
         "look_up",
         "clipboard_files",
@@ -463,6 +467,14 @@ impl Platform for Probe {
     }
     fn set_text_language(&self, _: Option<&str>) {
         self.heard("set_text_language");
+    }
+    fn add_font(&self, _: Arc<[u8]>) -> Result<Vec<String>, String> {
+        self.heard("add_font");
+        Ok(Vec::new())
+    }
+    fn fonts(&self) -> Vec<Arc<[u8]>> {
+        self.heard("fonts");
+        Vec::new()
     }
     fn looks_up(&self) -> bool {
         self.heard("looks_up");
