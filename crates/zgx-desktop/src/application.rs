@@ -33,6 +33,24 @@ use zgx::{
 };
 use zgx_gpu::{GpuContext, GpuRenderer};
 
+thread_local! {
+    /// Menu actions a window's keys chose (its shortcuts, bound in its input:
+    /// `bind_keys`) that nothing in the window took, in order, by window: the
+    /// app's to carry out. Carried out as soon as the window event that chose
+    /// them is handled (`WindowManager::window_event`), before the next; an
+    /// event posted to the loop (`Event::MenuFallback`) catches any chosen
+    /// outside a window event.
+    static MENU_FALLBACKS: RefCell<VecDeque<(u64, crate::MenuAction)>> = RefCell::default();
+}
+/// Native menu items chosen and not yet carried out, in order (macOS): AppKit
+/// calls muda's handler inside the dispatch of the key that chose one, and
+/// the event the handler posts to the loop (`Event::NativeMenuAction`) can
+/// arrive after input AppKit had queued behind that key. Every window event
+/// first carries these out (`WindowManager::window_event`).
+#[cfg(target_os = "macos")]
+static NATIVE_MENU_CHOSEN: std::sync::Mutex<VecDeque<crate::MenuAction>> =
+    std::sync::Mutex::new(VecDeque::new());
+
 /// How a window is made: its title, size, chrome and placement.
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
@@ -167,7 +185,9 @@ enum Event {
     /// An event, with the token of the launch that sent it (Linux).
     Application(crate::ApplicationEvent, Option<String>),
     MenuAction(u64, crate::MenuAction),
-    MenuFallback(u64, crate::MenuAction),
+    /// Menu actions a window's keys chose and nothing in it took
+    /// (`MENU_FALLBACKS`): carry them out.
+    MenuFallback,
     MenusChanged,
     /// A font was replaced (`WindowFactory::replace_font`): every window's
     /// text shapes and draws again.
@@ -180,8 +200,9 @@ enum Event {
     /// The desktop's appearance settings changed (`linux_appearance`).
     #[cfg(target_os = "linux")]
     AppearanceChanged,
+    /// Native menu items were chosen (`NATIVE_MENU_CHOSEN`): carry them out.
     #[cfg(target_os = "macos")]
-    NativeMenuAction(crate::MenuAction),
+    NativeMenuAction,
     /// AppKit said a window goes into or out of full screen, or is there
     /// (`window_chrome::watch_full_screen`).
     #[cfg(target_os = "macos")]
@@ -1147,7 +1168,10 @@ impl Application {
         {
             let wake = proxy.clone();
             muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
-                let _ = wake.send_event(Event::NativeMenuAction(crate::MenuAction(event.id.0)));
+                if let Ok(mut chosen) = NATIVE_MENU_CHOSEN.lock() {
+                    chosen.push_back(crate::MenuAction(event.id.0));
+                }
+                let _ = wake.send_event(Event::NativeMenuAction);
             }));
             // With none of the app's own, still the application and Window
             // menus every Mac app has: checked now, made once the first frame
@@ -1305,6 +1329,32 @@ const TRIM_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
 /// (`GpuRenderer::rest_queue`): idle that long, a queue starts as slowly as a
 /// new one, so the next frame pays no more for it than it would anyway.
 const QUEUE_REST_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+/// A wake whose first frame came to a queue given back at least
+/// `QUEUE_REST_DELAY` before (`rested`, when), with no input since: a lone
+/// wake (a clock's tick, an update from elsewhere). Its queue goes back at its
+/// trim, not `QUEUE_REST_DELAY` later: the next lone wake finds it cold
+/// either way, and Metal's driver holds ~200 MB for a queue while it's kept.
+/// A wake soon after another keeps the queue as before (its first frame comes
+/// to a queue given back less than `QUEUE_REST_DELAY` before).
+fn lone_wake(
+    rested: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    rested.filter(|rested| now.saturating_duration_since(*rested) >= QUEUE_REST_DELAY)
+}
+/// Whether a lone wake (`lone_wake`'s `rested`) gives its queue back at its
+/// trim: not if input has acted since the queue rested (someone is here, and
+/// the next frame may follow soon).
+/// `ZGX_QUEUE_REST_LONE=0` keeps a lone wake's queue for `QUEUE_REST_DELAY`,
+/// as before (to compare).
+static QUEUE_REST_LONE: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_QUEUE_REST_LONE").is_none_or(|v| v != "0"));
+fn queue_rests_at_trim(
+    lone: Option<std::time::Instant>,
+    acted_at: Option<std::time::Instant>,
+) -> bool {
+    lone.is_some_and(|rested| !acted_since(acted_at, Some(rested)))
+}
 /// A window idle this long past that gives back a glyph atlas it grew: what
 /// it costs is a slow first frame, for someone who has been away a while.
 const ATLAS_TRIM_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1360,8 +1410,8 @@ fn answers_input(acted_at: Option<std::time::Instant>, now: std::time::Instant) 
     acted_at.is_some_and(|at| now.saturating_duration_since(at) < INPUT_LIVE)
 }
 /// Whether input acted after the frame last shown (`shown`): the next draws
-/// at once, not at the refresh's tick (`Host::process`).
-#[cfg(target_os = "macos")]
+/// at once, not at the refresh's tick (`Host::process`). Also whether a lone
+/// wake's queue rests at its trim (`queue_rests_at_trim`), on every platform.
 fn acted_since(acted_at: Option<std::time::Instant>, shown: Option<std::time::Instant>) -> bool {
     acted_at.is_some_and(|at| shown.is_none_or(|shown| at > shown))
 }
@@ -2028,6 +2078,11 @@ struct Host {
     trim_stage: TrimStage,
     /// What's owed at rest after the trim (`TrimStage::Rest`).
     rest: Rest,
+    /// When this window last gave its GPU queue back, while no frame has used
+    /// it since (`lone_wake`).
+    queue_rested: Option<std::time::Instant>,
+    /// This wake is a lone one: when its queue had rested (`lone_wake`).
+    lone_wake: Option<std::time::Instant>,
     /// When to save the window's frame (`frame_autosave`, Linux): once its
     /// moves and resizes settle.
     frame_save_at: Option<std::time::Instant>,
@@ -2188,7 +2243,13 @@ impl Host {
                 && let Some(action) = action.downcast_ref::<crate::MenuAction>()
                 && crate::app_menu::enabled_action(&menus.borrow(), action)
             {
-                let _ = fallback.send_event(Event::MenuFallback(token, action.clone()));
+                // Carried out as soon as the event dispatching it is done
+                // (`WindowManager::window_event`), before the input after
+                // it: a key typed just after ⌘N is the new chat's. (Posted
+                // too, for an action dispatched outside a window event.)
+                MENU_FALLBACKS
+                    .with(|queued| queued.borrow_mut().push_back((token, action.clone())));
+                let _ = fallback.send_event(Event::MenuFallback);
                 event.prevent_default();
             }
         });
@@ -2458,6 +2519,8 @@ impl Host {
             trim_at: None,
             trim_stage: TrimStage::Trim,
             rest: Rest::none(),
+            queue_rested: None,
+            lone_wake: None,
             release_images_at: None,
             release_rows_at: None,
             frame_save_at: None,
@@ -3458,6 +3521,11 @@ impl Host {
                     }
                     self.trim_stage = TrimStage::Trim;
                     self.rest = Rest::none();
+                    // The wake's first frame: a lone wake if the queue had
+                    // rested long (the rest of the wake's frames keep it).
+                    if let Some(rested) = self.queue_rested.take() {
+                        self.lone_wake = lone_wake(Some(rested), now);
+                    }
                     // Startup's garbage (shader compilation, first layout)
                     // is freed once, even if the window never goes idle.
                     if self.startup_trim == StartupTrim::Pending {
@@ -6761,6 +6829,17 @@ impl Host {
                     self.renderer.as_ref().is_some_and(|r| r.atlas_grown()),
                     self.renderer.is_some() && cfg!(target_os = "macos"),
                 );
+                // A lone wake gives the queue back now (`lone_wake`).
+                if queue_rests_at_trim(self.lone_wake.take(), self.context.ui.acted_at())
+                    && *QUEUE_REST_LONE
+                    && self.rest.queue
+                {
+                    self.rest.queue = false;
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.rest_queue();
+                    }
+                    self.queue_rested = Some(std::time::Instant::now());
+                }
                 self.trim_stage = TrimStage::Rest;
                 self.native.trim();
                 self.context.ui.scene.borrow_mut().rest();
@@ -6781,6 +6860,7 @@ impl Host {
                     if let Some(renderer) = &mut self.renderer {
                         renderer.rest_queue();
                     }
+                    self.queue_rested = Some(now);
                 }
             }
             // The next of what's still owed.
@@ -7872,6 +7952,68 @@ impl WindowManager {
             crate::x11_startup::complete(&window, &token);
         }
     }
+    /// Carry out the native menu items chosen so far (`NATIVE_MENU_CHOSEN`),
+    /// in the order they were chosen, each in the key window.
+    #[cfg(target_os = "macos")]
+    fn native_menu_chosen(&mut self) {
+        loop {
+            let next = NATIVE_MENU_CHOSEN
+                .lock()
+                .ok()
+                .and_then(|mut chosen| chosen.pop_front());
+            let Some(action) = next else {
+                return;
+            };
+            self.native_menu_action(action);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    fn native_menu_action(&mut self, action: crate::MenuAction) {
+        // The key window: winit reports a window unfocused while a
+        // native view in it (a web page, a terminal) has first
+        // responder, so ask AppKit too.
+        let focused = self
+            .hosts
+            .iter()
+            .find(|(_, host)| host.native_focused && !host.context.window.is_closed())
+            .or_else(|| {
+                self.hosts.iter().find(|(_, host)| {
+                    !host.context.window.is_closed()
+                        && host.window.as_ref().is_some_and(|w| is_key_window(w))
+                })
+            })
+            .map(|(token, _)| *token)
+            // No key window (the app is in the background, a menu
+            // chosen through accessibility): its only window.
+            .or_else(|| {
+                let mut open = self
+                    .hosts
+                    .iter()
+                    .filter(|(_, host)| !host.context.window.is_closed());
+                match (open.next(), open.next()) {
+                    (Some((token, _)), None) => Some(*token),
+                    _ => None,
+                }
+            });
+        if let Some(token) = focused {
+            self.menu_action(token, action);
+        }
+    }
+    /// Carry out the menu actions windows' keys chose that nothing in them
+    /// took (`MENU_FALLBACKS`), in order, each in its window.
+    fn menu_fallbacks(&mut self) {
+        while let Some((token, action)) =
+            MENU_FALLBACKS.with(|queued| queued.borrow_mut().pop_front())
+        {
+            if crate::app_menu::enabled_action(&self.factory.menus.borrow(), &action)
+                && let Some(host) = self.hosts.get_mut(&token)
+                && !host.context.window.is_closed()
+                && let Some(callback) = &mut host.context.menu_action
+            {
+                callback(action);
+            }
+        }
+    }
     fn menu_action(&mut self, token: u64, action: crate::MenuAction) {
         // The window's zoom items, which zgx puts in the View menu.
         if let Some(zoom) = crate::app_menu::zoom_action(&action) {
@@ -8167,15 +8309,7 @@ impl WindowManager {
                 }
             }
             Event::MenuAction(token, action) => self.menu_action(token, action),
-            Event::MenuFallback(token, action) => {
-                if crate::app_menu::enabled_action(&self.factory.menus.borrow(), &action)
-                    && let Some(host) = self.hosts.get_mut(&token)
-                    && !host.context.window.is_closed()
-                    && let Some(callback) = &mut host.context.menu_action
-                {
-                    callback(action);
-                }
-            }
+            Event::MenuFallback => self.menu_fallbacks(),
             #[cfg(target_os = "linux")]
             Event::NativeFiles(token, event) => {
                 if let Some(host) = self.hosts.get_mut(&token)
@@ -8332,37 +8466,7 @@ impl WindowManager {
                 }
             }
             #[cfg(target_os = "macos")]
-            Event::NativeMenuAction(action) => {
-                // The key window: winit reports a window unfocused while a
-                // native view in it (a web page, a terminal) has first
-                // responder, so ask AppKit too.
-                let focused = self
-                    .hosts
-                    .iter()
-                    .find(|(_, host)| host.native_focused && !host.context.window.is_closed())
-                    .or_else(|| {
-                        self.hosts.iter().find(|(_, host)| {
-                            !host.context.window.is_closed()
-                                && host.window.as_ref().is_some_and(|w| is_key_window(w))
-                        })
-                    })
-                    .map(|(token, _)| *token)
-                    // No key window (the app is in the background, a menu
-                    // chosen through accessibility): its only window.
-                    .or_else(|| {
-                        let mut open = self
-                            .hosts
-                            .iter()
-                            .filter(|(_, host)| !host.context.window.is_closed());
-                        match (open.next(), open.next()) {
-                            (Some((token, _)), None) => Some(*token),
-                            _ => None,
-                        }
-                    });
-                if let Some(token) = focused {
-                    self.menu_action(token, action);
-                }
-            }
+            Event::NativeMenuAction => self.native_menu_chosen(),
             Event::WindowCommand(token, command) => {
                 if let Some(host) = self.hosts.get_mut(&token) {
                     if !host.context.window.is_closed() {
@@ -8839,6 +8943,21 @@ impl ApplicationHandler<Event> for WindowManager {
         }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // A menu item chosen before this event (its shortcut, a key AppKit
+        // hands the menu first) acts before it: the event the item's handler
+        // posts can come after input queued behind its key (a key typed just
+        // after ⌘N), which would otherwise reach what had focus before.
+        #[cfg(target_os = "macos")]
+        if NATIVE_MENU_CHOSEN
+            .lock()
+            .is_ok_and(|chosen| !chosen.is_empty())
+        {
+            self.native_menu_chosen();
+        }
+        // So does a menu action an earlier event's keys chose (`MENU_FALLBACKS`).
+        if MENU_FALLBACKS.with(|queued| !queued.borrow().is_empty()) {
+            self.menu_fallbacks();
+        }
         // Motion before the press or key that came after it.
         self.flush_motion(event_loop);
         // Pointer moves come as often as the mouse reports them (Wayland
@@ -8863,6 +8982,12 @@ impl ApplicationHandler<Event> for WindowManager {
             self.flush_move(event_loop);
         }
         self.window_event_now(event_loop, id, event);
+        // A shortcut this event's key chose, that nothing in the window took:
+        // carried out now, before the next event (a key typed just after ⌘N
+        // reaches the new chat, not the old).
+        if MENU_FALLBACKS.with(|queued| !queued.borrow().is_empty()) {
+            self.menu_fallbacks();
+        }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -9681,7 +9806,6 @@ mod tests {
 
     /// Input acting after the frame last shown draws the next at once;
     /// input the shown frame already answered doesn't.
-    #[cfg(target_os = "macos")]
     #[test]
     fn input_since_the_frame_shown_draws_at_once() {
         use super::acted_since;
@@ -9760,6 +9884,35 @@ mod tests {
 
     /// A window at rest gives back Metal's queue, then its glyph atlas, each
     /// at its own delay past the trim, and nothing once both have gone.
+    /// A wake after a long rest with no input gives its queue back at its
+    /// trim; one soon after another, or one someone acted in, keeps it.
+    #[test]
+    fn a_lone_wake_gives_its_queue_back_at_its_trim() {
+        use super::{QUEUE_REST_DELAY, lone_wake, queue_rests_at_trim};
+        let rested = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        // A clock's tick 30 s into a rest: lone.
+        let tick = rested + std::time::Duration::from_secs(30);
+        assert_eq!(lone_wake(Some(rested), tick), Some(rested));
+        assert!(queue_rests_at_trim(lone_wake(Some(rested), tick), None));
+        // Input before the queue rested doesn't count; input since does,
+        // even the click that woke it (it acts before the first frame).
+        assert!(queue_rests_at_trim(Some(rested), Some(rested - ms(5))));
+        assert!(!queue_rests_at_trim(Some(rested), Some(tick - ms(10))));
+        // A wake soon after the queue rested (updates coming every few
+        // seconds) keeps it warm, as before.
+        assert_eq!(lone_wake(Some(rested), rested + ms(3000)), None);
+        assert!(!queue_rests_at_trim(
+            lone_wake(Some(rested), rested + ms(3000)),
+            None
+        ));
+        assert_eq!(
+            lone_wake(Some(rested), rested + QUEUE_REST_DELAY),
+            Some(rested)
+        );
+        // A queue that never rested (a window's first frames): not lone.
+        assert_eq!(lone_wake(None, tick), None);
+    }
     #[test]
     fn rest_gives_back_the_atlas_then_the_queue() {
         use super::{ATLAS_TRIM_DELAY, QUEUE_REST_DELAY, Rest};
