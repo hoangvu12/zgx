@@ -1894,7 +1894,9 @@ export type WheelEvent = {
 	dy: number,
 }
 -- A middle (or other extra) button's click, as the DOM's `auxclick`:
--- `button` is "middle", or the platform's number for another button.
+-- `button` is "middle", or the platform's number for another button. Also
+-- `on_aux_press`'s and `on_aux_release`'s: `cancelled` on a release that is
+-- the gesture cancelled rather than the button let go.
 export type AuxClickEvent = {
 	x: number,
 	y: number,
@@ -1910,6 +1912,7 @@ export type AuxClickEvent = {
 	meta: boolean,
 	cmd: boolean,
 	button: "middle" | number,
+	cancelled: boolean?,
 }
 -- A trackpad pinch: the fingers' spread changed by `scale` (0.05: 5%
 -- larger, zoom in; negative, out), at the pointer.
@@ -2603,6 +2606,11 @@ export type NodeProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: (((e: AuxClickEvent) -> ...unknown) | Action)?,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: (((e: AuxClickEvent) -> ...unknown) | Action)?,
+	on_aux_release: (((e: AuxClickEvent) -> ...unknown) | Action)?,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -3052,6 +3060,11 @@ export type Props = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -3372,6 +3385,8 @@ export type Props_sound = SoundProp?
 export type Props_on_press = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_release = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_aux_click = (((e: AuxClickEvent) -> ...unknown) | Action)?
+export type Props_on_aux_press = (((e: AuxClickEvent) -> ...unknown) | Action)?
+export type Props_on_aux_release = (((e: AuxClickEvent) -> ...unknown) | Action)?
 export type Props_on_double_click = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_navigate = (((e: NavigateEvent) -> ...unknown) | Action)?
 export type Props_on_copy = ((request: SelectionCopy) -> ...ClipboardContent?)?
@@ -3754,6 +3769,11 @@ export type ContainerProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -4217,6 +4237,11 @@ export type GlassProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -4689,6 +4714,11 @@ export type ScrollProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -5178,6 +5208,11 @@ export type TextProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -5626,6 +5661,11 @@ export type MarkdownViewProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -6171,6 +6211,11 @@ export type RichProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -6613,6 +6658,11 @@ export type ImageProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -7072,6 +7122,11 @@ export type SvgProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -7642,6 +7697,11 @@ export type Scene3DProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -8107,6 +8167,11 @@ export type CanvasProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -8581,6 +8646,11 @@ export type CheckboxProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -9033,6 +9103,11 @@ export type InputProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -9586,6 +9661,11 @@ export type ProgressProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -10026,6 +10106,11 @@ export type SliderProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -10487,6 +10572,11 @@ export type SegmentedProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -10941,6 +11031,11 @@ export type StepperProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -11396,6 +11491,11 @@ export type DisclosureProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -11862,6 +11962,11 @@ export type AccordionProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -12302,6 +12407,11 @@ export type SectionProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -12767,6 +12877,11 @@ export type SeparatorProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -13215,6 +13330,11 @@ export type TabsProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -13685,6 +13805,11 @@ export type TreeProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -14151,6 +14276,11 @@ export type DataGridProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -14613,6 +14743,11 @@ export type CalendarProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -15068,6 +15203,11 @@ export type DatePickerProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -15521,6 +15661,11 @@ export type TimeFieldProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -15973,6 +16118,11 @@ export type ComboboxProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -16433,6 +16583,11 @@ export type CommandPaletteProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -16881,6 +17036,11 @@ export type SelectProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -17336,6 +17496,11 @@ export type SplitProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -17847,6 +18012,11 @@ export type ListProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -18389,6 +18559,11 @@ export type LayerProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -18851,6 +19026,11 @@ export type ModalProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -19331,6 +19511,11 @@ export type PopoverProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -19817,6 +20002,11 @@ export type MenuItemProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -20268,6 +20458,11 @@ export type SubmenuProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -20736,6 +20931,11 @@ export type WebViewProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
@@ -21204,6 +21404,11 @@ export type TerminalProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -21647,6 +21852,11 @@ export type SlotProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -22141,6 +22351,11 @@ export type EachOptions = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
@@ -22599,6 +22814,11 @@ export type PresenceOptions = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: Props_on_aux_click,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: Props_on_aux_press,
+	on_aux_release: Props_on_aux_release,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
