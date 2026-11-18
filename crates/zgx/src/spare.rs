@@ -538,10 +538,7 @@ impl crate::widgets::Ui {
                 let passes = list.passes.get();
                 list.may_build.set(true);
                 list.tick.update(|tick| *tick = tick.wrapping_add(1));
-                // Ahead of the frame's: rows built and laid out, their
-                // observers' bounds and visibility left to the frame's
-                // preparation, which delivers them once before it draws.
-                self.try_prepare_frame_ahead()?;
+                self.try_prepare_frame()?;
                 // Its list has gone with its window's scene.
                 if list.passes.get() == passes {
                     list.may_build.set(false);
