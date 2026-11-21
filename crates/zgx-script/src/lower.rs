@@ -500,7 +500,7 @@ impl Hooks {
             && (node.id.is_some()
                 || !node.classes.is_empty()
                 || node.hook().is_some()
-                || node.provide.is_some()
+                || node.rare().provide.is_some()
                 || node.private)
     }
     /// Every contribution, in the order the scripts made them.
@@ -1253,8 +1253,8 @@ fn filtered(
                 a11y.label = filtered_source(source.as_ref(), Value::Nil, Ty::Str, plugin, f, &app);
             }
             Filtered::Disabled => {
-                copy.disabled = filtered_source(
-                    copy.disabled.as_ref(),
+                copy.rare_mut().disabled = filtered_source(
+                    copy.rare().disabled.as_ref(),
                     Value::Bool(false),
                     Ty::Bool,
                     plugin,
@@ -1280,7 +1280,7 @@ fn filtered(
             // A tooltip's text is written once: passed through as the
             // element is built.
             Filtered::Tooltip => {
-                if let Some(tooltip) = &mut copy.tooltip
+                if let Some(tooltip) = copy.rare.as_deref_mut().and_then(|r| r.tooltip.as_mut())
                     && let Some(TooltipContent::Text(text)) = &mut tooltip.content
                 {
                     let value = passed(plugin, f, Value::Str(text.as_str().into()));
@@ -1470,16 +1470,16 @@ fn decorated(mut view: View, node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>) -
         tip @ crate::node::Tooltip {
             content: Some(_), ..
         },
-    ) = node.tooltip.as_deref()
+    ) = node.rare().tooltip.as_deref()
     {
         view = tooltip(view, tip, low);
     }
-    if let Some(spec) = &node.theme {
+    if let Some(spec) = &node.rare().theme {
         view = themed(spec, vm, view);
     }
     // Its values over what its ancestors were given, for the components
     // and rows built under it (`ui.use_context`).
-    if let Some(own) = &node.provide {
+    if let Some(own) = &node.rare().provide {
         let own = own.clone();
         view = zgx::compose::provide_with(
             move |cx| {
@@ -1599,6 +1599,12 @@ fn token_field(prop: Prop) -> Option<zgx::theme::Field> {
         BackdropBlur => Field::Blur,
         W => Field::Width,
         H => Field::Height,
+        GapX => Field::GapX,
+        GapY => Field::GapY,
+        MinW => Field::MinWidth,
+        MaxW => Field::MaxWidth,
+        MinH => Field::MinHeight,
+        MaxH => Field::MaxHeight,
         _ => return None,
     })
 }
@@ -2581,7 +2587,9 @@ fn in_place(node: &Rc<Node>) -> Node {
     let mut held = Node::new(node.owner.clone(), Kind::Div);
     held.props
         .push((Prop::Display, Source::Lit(Lit::Str("contents".into()))));
-    held.provide = node.provide.clone();
+    if let Some(provide) = &node.rare().provide {
+        held.rare_mut().provide = Some(provide.clone());
+    }
     held.children = vec![node.clone()];
     held
 }
@@ -2831,12 +2839,12 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
     let web = spec.web.clone();
     let view = match (&spec.src, &spec.html) {
         (Some(src), _) => {
-            let (src, vm) = (resolve_owned(src), vm.clone());
+            let (src, vm, id) = (resolve_owned(src), vm.clone(), spec.id.clone());
             // Refused, it stays where it is (blank, the first time).
             let mut shown = "about:blank".to_owned();
             web_view_src(&web, move || match resolve(&src, Ty::Str, None, &vm) {
                 Some(Lit::Str(url)) => {
-                    match crate::rules::guard(&vm.lua, crate::GuardKind::Web, &url) {
+                    match crate::rules::guard_web(&vm.lua, id.as_deref(), &url) {
                         Ok(()) => {
                             shown = url.to_string();
                             shown.clone()
@@ -2852,7 +2860,7 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
         }
         (None, Some((html, base))) => {
             let name = base.as_deref().unwrap_or("about:blank");
-            match crate::rules::guard(&vm.lua, crate::GuardKind::Web, name) {
+            match crate::rules::guard_web(&vm.lua, spec.id.as_deref(), name) {
                 Ok(()) => web.load_html(html.clone(), base.as_deref()),
                 Err(error) => vm.report(error),
             }
@@ -3340,6 +3348,13 @@ fn kind_view(
             if rare.as_deref().is_some_and(|rare| rare.contain) {
                 view = view.overscroll_contain();
             }
+            // A test, not a closure: one more closure here would renumber
+            // the arm's, and the inline-scopes check names them by number.
+            if let Some(rare) = rare.as_deref()
+                && rare.no_drop_caret
+            {
+                view = without_drop_caret(view);
+            }
             match rare.as_deref().and_then(|rare| rare.read_only.as_ref()) {
                 None | Some(Source::Lit(Lit::Bool(false))) => {}
                 Some(Source::Lit(Lit::Bool(true))) => view = view.read_only(true),
@@ -3361,7 +3376,7 @@ fn kind_view(
                     Some(theme) => theme,
                     None => zgx::theme::Themes::of(&low.runtime).root().clone(),
                 };
-                view = code_editor(view, code, searched, vm, theme);
+                view = code_editor(view, code, searched, vm, low, theme);
             }
             view
         }
@@ -3869,7 +3884,7 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
         )
     });
     let mut view = kind_view(node, vm, low, cx.as_deref_mut(), element.as_deref());
-    if let Some(mask) = &node.mask {
+    if let Some(mask) = &node.rare().mask {
         view = view
             .mask(mask.image.clone(), mask.size)
             .mask_offset(mask.offset.0, mask.offset.1);
@@ -3932,6 +3947,15 @@ fn press_flagged(mut view: View, flags: u8) -> View {
     view
 }
 
+/// `list`, with room for one if it has none: a first push takes room for
+/// four, and a node's dynamic styles are most often one.
+#[inline]
+fn fitted<T>(list: &mut Vec<T>) -> &mut Vec<T> {
+    if list.capacity() == 0 {
+        list.reserve_exact(1);
+    }
+    list
+}
 /// What a node sets on its view, after its children: styles, handlers,
 /// observers. Apart from `build` for its frame, as `kind_view`.
 #[cfg_attr(debug_assertions, inline(never))]
@@ -3946,6 +3970,8 @@ fn styled(
     // Literal styles apply once. Anything that can change, and an element's
     // animated values, share one reactive style.
     let mut statics: smallvec::SmallVec<[(Prop, Lit); 8]> = smallvec::SmallVec::new();
+    // Kept by the node's reactive style for its life. Its first entry takes
+    // room for one (`fitted`), not four: most have one.
     let mut dynamic = Vec::new();
     for (prop, source) in &node.props {
         match source {
@@ -3955,9 +3981,9 @@ fn styled(
                     view = view.pixel_snap();
                 }
                 let scalar = anim::drive(need(&mut cx), spec);
-                dynamic.push((*prop, resolve_owned(source), Some(scalar)));
+                fitted(&mut dynamic).push((*prop, resolve_owned(source), Some(scalar)));
             }
-            _ => dynamic.push((*prop, resolve_owned(source), None)),
+            _ => fitted(&mut dynamic).push((*prop, resolve_owned(source), None)),
         }
     }
     // A dynamic part of a translation or transform carries its literal
@@ -4085,6 +4111,17 @@ fn styled(
         || params_only.is_some()
         || layer.is_some()
     {
+        // A background image and a shader's fill and parameters, boxed
+        // together: the style closure below keeps what it captures for the
+        // node's life, and these were most of it (a shader's parameters
+        // are 64 bytes each) on the many nodes with none.
+        // An `if`, not `bool::then`: its closure would take the three by
+        // value (a shader's parameters are 64 bytes) on every node.
+        let extras = if bg_image.is_some() || shader.is_some() || params_only.is_some() {
+            Some(Box::new((bg_image, shader, params_only)))
+        } else {
+            None
+        };
         let vm = vm.clone();
         let element = element.clone();
         let mut apart: Option<Box<StylesApart>> = None;
@@ -4136,16 +4173,6 @@ fn styled(
                     }
                 }
             };
-            let image = bg_image.as_ref().and_then(|(src, fit, low)| {
-                match resolve(src, Ty::Str, None, &vm) {
-                    Some(Lit::Str(path)) => load_image(&vm, low, &path).map(|image| (image, *fit)),
-                    _ => None,
-                }
-            });
-            let styles = match image {
-                Some((image, fit)) => styles.bg_image(image, fit),
-                None => styles,
-            };
             let styles = match layer.as_deref() {
                 Some((shader, params, bleed, reach)) => {
                     let animated = element
@@ -4162,8 +4189,23 @@ fn styled(
                 }
                 None => styles,
             };
+            // An image and a shader, from their box: a node with neither
+            // takes this one branch.
+            let Some((bg_image, shader, params_only)) = extras.as_deref() else {
+                return styles;
+            };
+            let image = bg_image.as_ref().and_then(|(src, fit, low)| {
+                match resolve(src, Ty::Str, None, &vm) {
+                    Some(Lit::Str(path)) => load_image(&vm, low, &path).map(|image| (image, *fit)),
+                    _ => None,
+                }
+            });
+            let styles = match image {
+                Some((image, fit)) => styles.bg_image(image, fit),
+                None => styles,
+            };
             // A shader fill, with its literal parameters unless animated.
-            match &shader {
+            match shader {
                 Some((fill, params, tokens, driven)) => {
                     let animated = element.as_ref().and_then(|e| e.animated.borrow().shader);
                     let uniforms = animated.unwrap_or(zgx::decoration::ShaderUniforms {
@@ -4188,7 +4230,7 @@ fn styled(
                         false => styles.bg_shader(fill.clone()).shader_uniforms(uniforms),
                     }
                 }
-                None => match params_only {
+                None => match *params_only {
                     Some(params) => styles.shader_uniforms(
                         element
                             .as_ref()
@@ -4200,7 +4242,7 @@ fn styled(
             }
         });
     }
-    if let Some(selection) = &node.variant_interaction {
+    if let Some(selection) = &node.rare().variant_interaction {
         // Variants chosen by state set interaction styles: the choice's,
         // the element's own over them, swapped when the choice changes.
         let (selection, own) = (selection.clone(), crate::node::interaction_of(&node.pseudo));
@@ -4240,7 +4282,7 @@ fn styled(
     {
         view = zgx::shader_drive::attach_themed(need(&mut cx), view, tokens, make);
     }
-    if let Some(disabled) = &node.disabled {
+    if let Some(disabled) = &node.rare().disabled {
         let (disabled, vm) = (resolve_owned(disabled), vm.clone());
         view = view.disabled_when(move || {
             resolve(&disabled, Ty::Bool, None, &vm) == Some(Lit::Bool(true))
@@ -4259,7 +4301,7 @@ fn styled(
             view = region_copy(view, node, vm, low);
         }
     }
-    if let Some(colors) = &node.selection_colors {
+    if let Some(colors) = &node.rare().selection_colors {
         // A token (`"$accent"`) follows the node's theme; anything that
         // does not resolve keeps the theme's own colour.
         let theme = match cx.as_deref().map(Context::theme) {
@@ -4286,7 +4328,7 @@ fn styled(
             };
         }
     }
-    match &node.pointer_events {
+    match &node.rare().pointer_events {
         Some(Source::Lit(Lit::Bool(enabled))) => view = view.pointer_events(*enabled),
         Some(source) => {
             // Followed: a state or a function (`"none"`, `"auto"` or a boolean).
@@ -4353,7 +4395,7 @@ fn styled(
     let handle: Option<Rc<OnceCell<NodeHandle>>> = (element.is_some()
         || events.any_input()
         || events.any_drag()
-        || events.drag_preview.is_some())
+        || events.drags().drag_preview.is_some())
     .then(Rc::default);
     let handle_for = || handle.clone().expect("made for what reads it");
     if events.any_input() {
@@ -4363,7 +4405,7 @@ fn styled(
             view = with_rare(view, rare, follows, vm, low, handle_for());
         }
     }
-    if events.any_drag() || events.drag_preview.is_some() {
+    if events.any_drag() || events.drags().drag_preview.is_some() {
         view = with_drag(view, node, vm, low, handle_for());
     }
     if let Some(style) = &node.events().context_menu_style {
@@ -4397,11 +4439,11 @@ fn styled(
         // the box's parent.
         let track = node.tracks_layout().then(|| {
             let timing = crate::motion::Timing {
-                ease: node.layout.as_ref().and_then(|l| l.ease.clone()),
-                duration: node.layout.as_ref().and_then(|l| l.duration),
+                ease: node.rare().layout.as_ref().and_then(|l| l.ease.clone()),
+                duration: node.rare().layout.as_ref().and_then(|l| l.duration),
             };
             let depth = if node.sizes_layout() { 2 } else { 0 };
-            (node.layout_id.clone(), timing, depth)
+            (node.rare().layout_id.clone(), timing, depth)
         });
         let (mount, resize, visible, visible_margin, vm) = (
             node.events().mount.clone(),
@@ -4542,7 +4584,18 @@ fn styled(
             view = view.role(role);
         }
         if let Some(level) = a11y.level {
-            view = view.heading(usize::from(level));
+            view = if a11y.role == Some(zgx::semantics::Role::Heading) {
+                view.heading(usize::from(level))
+            } else {
+                view.level(usize::from(level))
+            };
+        }
+        if let Some(level) = &a11y.level_of {
+            let (level, vm) = (resolve_owned(level), vm.clone());
+            view = view.level_when(move || match resolve(&level, Ty::Num, None, &vm) {
+                Some(Lit::Num(level)) if level >= 1. => level.min(255.) as usize,
+                _ => 1,
+            });
         }
         if let Some(selected) = &a11y.selected {
             let (selected, vm) = (resolve_owned(selected), vm.clone());
@@ -4618,7 +4671,7 @@ fn styled(
             };
         }
     }
-    if let Some(layout) = &node.layout {
+    if let Some(layout) = &node.rare().layout {
         if layout.hit {
             view = hit_at_target(view, node, vm, low, element.clone());
         }
@@ -6276,7 +6329,7 @@ fn with_drag(
                 }
             })
     }
-    if let Some(drag) = events.drag.clone() {
+    if let Some(drag) = events.drags().drag.clone() {
         let vm = vm.clone();
         // Nil (or an error) starts no drag from this press: a row that drags
         // only some of what it shows.
@@ -6286,13 +6339,16 @@ fn with_drag(
                 .filter(|v| !matches!(v, Value::Nil))
         });
     }
-    if let Some(preview) = events.drag_preview.clone() {
+    if let Some(preview) = events.drags().drag_preview.clone() {
         let (vm, low) = (vm.clone(), low.clone());
         let build = move |payload: &Value| {
             let result = vm.call::<mlua::Value>(&preview, payload.clone());
             built(&vm, result, &low)
         };
-        view = match (events.drag_preview_anchor, events.drag_preview_offset) {
+        view = match (
+            events.drags().drag_preview_anchor,
+            events.drags().drag_preview_offset,
+        ) {
             (None, None) => view.drag_preview(build),
             (anchor, offset) => view.drag_preview_anchored(
                 anchor.unwrap_or_default(),
@@ -6301,13 +6357,13 @@ fn with_drag(
             ),
         };
     }
-    if let Some(end) = events.drag_end.clone() {
+    if let Some(end) = events.drags().drag_end.clone() {
         let vm = vm.clone();
         view = view.on_drag_end(move |payload: &Value, accepted| {
             call(&vm, &end, (payload.clone(), accepted));
         });
     }
-    if let Some(export) = events.drag_export.clone() {
+    if let Some(export) = events.drags().drag_export.clone() {
         let vm = vm.clone();
         view = view.drag_export(move |payload: &Value| {
             use zgx::input::DragItem;
@@ -6324,7 +6380,7 @@ fn with_drag(
             out
         });
     }
-    if let Some(outside) = events.drag_outside.clone() {
+    if let Some(outside) = events.drags().drag_outside.clone() {
         let vm = vm.clone();
         view = view.on_drag_outside(move |payload: &Value, event| {
             let at = vm.lua.create_table().ok();
@@ -6341,7 +6397,7 @@ fn with_drag(
             call(&vm, &outside, (payload.clone(), at));
         });
     }
-    if let Some(moves) = events.drag_moves_window.clone() {
+    if let Some(moves) = events.drags().drag_moves_window.clone() {
         let vm = vm.clone();
         view = view.drag_moves_window(move |payload: &Value| {
             call(&vm, &moves, payload.clone()).is_some_and(|moves| {
@@ -6350,11 +6406,11 @@ fn with_drag(
         });
     }
     let (drop, accept, over, leave, spring) = (
-        events.drop.clone(),
-        events.drop_when.clone(),
-        events.drag_over.clone(),
-        events.drag_leave.clone(),
-        events.drag_spring.clone(),
+        events.drags().drop.clone(),
+        events.drags().drop_when.clone(),
+        events.drags().drag_over.clone(),
+        events.drags().drag_leave.clone(),
+        events.drags().drag_spring.clone(),
     );
     if drop.is_none() && over.is_none() && leave.is_none() && spring.is_none() {
         return view;
@@ -6636,6 +6692,7 @@ fn code_editor(
     code: &Rc<crate::node::CodeProps>,
     searched: Option<Signal<Value>>,
     vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
     theme: Rc<zgx::theme::ThemeScope>,
 ) -> View {
     // A colour as scripts write them (`"#ff8800"`, `"$accent"`), each
@@ -6701,6 +6758,9 @@ fn code_editor(
                 // styles read only where it has them.
                 let (mut from, mut to) = (f64::NAN, f64::NAN);
                 let mut style = zgx::widgets::SpanStyle::default();
+                // Whether it names a style: one with none is no span, known
+                // without comparing the style with the default.
+                let mut styled = false;
                 let number = |value: &mlua::StackValue| {
                     (value.type_name() == "number")
                         .then(|| value.get::<f64>().ok())
@@ -6714,15 +6774,28 @@ fn code_editor(
                         None => match number(&key) {
                             Some(1.) => from = number(&value).unwrap_or(f64::NAN),
                             Some(2.) => to = number(&value).unwrap_or(f64::NAN),
-                            Some(3.) => style.color = value.as_str().and_then(&*color_of),
+                            Some(3.) => {
+                                style.color = value.as_str().and_then(&*color_of);
+                                styled |= style.color.is_some();
+                            }
                             _ => {}
                         },
                         Some(b"weight") => {
                             style.weight = number(&value).map(|w| w.clamp(1., 1000.) as u16);
+                            styled |= style.weight.is_some();
                         }
-                        Some(b"italic") => style.italic = yes(&value),
-                        Some(b"strike") => style.strike = yes(&value),
-                        Some(b"bg") => style.background = value.as_str().and_then(&*color_of),
+                        Some(b"italic") => {
+                            style.italic = yes(&value);
+                            styled |= style.italic;
+                        }
+                        Some(b"strike") => {
+                            style.strike = yes(&value);
+                            styled |= style.strike;
+                        }
+                        Some(b"bg") => {
+                            style.background = value.as_str().and_then(&*color_of);
+                            styled |= style.background.is_some();
+                        }
                         Some(_) => {}
                     }
                     Ok(())
@@ -6730,7 +6803,7 @@ fn code_editor(
                 if walked.is_err() || !(from >= 1. && to >= from) {
                     continue;
                 }
-                if style != zgx::widgets::SpanStyle::default() {
+                if styled {
                     out.push((from as usize - 1..to as usize, style));
                 }
             }
@@ -6904,6 +6977,137 @@ fn code_editor(
     if let Some(tab) = &code.tab {
         view = view.tab_indent(tab.clone());
     }
+    if let Some(style) = &code.atom_style {
+        let (style, vm, theme) = (resolve_owned(style), vm.clone(), theme.clone());
+        let wash = match resolve(&style, Ty::Color, None, &vm) {
+            Some(Lit::Color(color)) => Some(color),
+            Some(Lit::Token(t)) => theme.get(t).color(),
+            _ => None,
+        };
+        if let Some(color) = wash {
+            view = view.atom_wash(color);
+        }
+    }
+    if let Some(look) = &code.atom_look {
+        view = view.atom_style(atom_style_of(look, vm, low, &theme));
+    }
+    if let Some(state) = &code.atoms {
+        let (state, color_of) = (state.clone(), color_of.clone());
+        let (vm, low, theme) = (vm.clone(), low.clone(), theme.clone());
+        // An atom's own `style` beyond its wash, made as its item is read.
+        let look_of = move |style: &Value| {
+            crate::node::atom_look_of(style)
+                .map(|look| Arc::new(atom_style_of(&look, &vm, &low, &theme)))
+        };
+        view = view.atoms_when(move |editor| {
+            let list = state.with(Clone::clone);
+            crate::atoms::from_list(&list, editor, &*color_of, &look_of)
+        });
+    }
+    if code.atoms.is_some() || code.on_atoms.is_some() {
+        let (state, told, vm) = (code.atoms.clone(), code.on_atoms.clone(), vm.clone());
+        view = view.on_atoms(move |event| {
+            let chars = |byte: usize| event.chars(byte);
+            if let Some(state) = &state {
+                let next = crate::atoms::list(event.atoms, chars);
+                if state.with(|now| *now != next) {
+                    state.set(next);
+                }
+            }
+            if let Some(told) = &told {
+                let result = (|| -> mlua::Result<()> {
+                    let change = vm.lua.create_table()?;
+                    change.set("reason", event.reason)?;
+                    let list = |lua: &mlua::Lua, items: Vec<Value>| -> mlua::Result<mlua::Table> {
+                        let table = lua.create_table()?;
+                        for value in items {
+                            table.push(crate::value::to_lua(&value, lua, false)?)?;
+                        }
+                        Ok(table)
+                    };
+                    change.set(
+                        "atoms",
+                        list(
+                            &vm.lua,
+                            match crate::atoms::list(event.atoms, chars) {
+                                Value::List(items) => items.to_vec(),
+                                _ => Vec::new(),
+                            },
+                        )?,
+                    )?;
+                    let mut added = Vec::new();
+                    let mut removed = Vec::new();
+                    for step in event.changes {
+                        match step {
+                            zgx::text_edit::AtomChange::Added(atom) => {
+                                added.push(crate::atoms::item(
+                                    atom,
+                                    (chars(atom.range.start), chars(atom.range.end)),
+                                ))
+                            }
+                            zgx::text_edit::AtomChange::Removed(atom, range, label) => {
+                                removed.push(crate::atoms::with_label(
+                                    crate::atoms::item(atom, (range.start, range.end)),
+                                    label,
+                                ));
+                            }
+                        }
+                    }
+                    change.set("added", list(&vm.lua, added)?)?;
+                    change.set("removed", list(&vm.lua, removed)?)?;
+                    vm.call::<()>(told, change)
+                })();
+                if let Err(error) = result {
+                    vm.report(error);
+                }
+            }
+        });
+    }
+    if let Some(told) = &code.on_atom_press {
+        let (told, vm) = (told.clone(), vm.clone());
+        view = view.on_atom_press(move |press| {
+            let result = (|| -> mlua::Result<Option<bool>> {
+                let atom = atom_value(&vm.lua, press.atom, press.text)?;
+                let at = vm.lua.create_table()?;
+                at.set("x", press.x)?;
+                at.set("y", press.y)?;
+                vm.call(&told, (atom, at))
+            })();
+            match result {
+                Ok(taken) => taken == Some(true),
+                Err(error) => {
+                    vm.report(error);
+                    false
+                }
+            }
+        });
+    }
+    if let Some(told) = &code.on_atom_hover {
+        let (told, vm) = (told.clone(), vm.clone());
+        view = view.on_atom_hover(move |hover| {
+            let result = (|| -> mlua::Result<()> {
+                let atom = match hover.atom {
+                    Some(atom) => mlua::Value::Table(atom_value(&vm.lua, atom, hover.text)?),
+                    None => mlua::Value::Nil,
+                };
+                let area = match hover.area {
+                    Some(area) => {
+                        let table = vm.lua.create_table()?;
+                        table.set("x", area.x)?;
+                        table.set("y", area.y)?;
+                        table.set("width", area.width)?;
+                        table.set("height", area.height)?;
+                        mlua::Value::Table(table)
+                    }
+                    None => mlua::Value::Nil,
+                };
+                vm.call(&told, (atom, area))
+            })();
+            if let Err(error) = result {
+                vm.report(error);
+            }
+        });
+    }
     if let Some(told) = &code.on_caret {
         let (told, vm) = (told.clone(), vm.clone());
         view = view.on_caret(move |caret| {
@@ -6922,6 +7126,73 @@ fn code_editor(
         });
     }
     view
+}
+/// A mention look (`atom_style`, an atom's `style`) as the text area shows
+/// it: its colours resolved in `theme`, its icon loaded (and tinted).
+fn atom_style_of(
+    look: &crate::node::AtomLook,
+    vm: &Rc<Vm>,
+    low: &Lowering,
+    theme: &zgx::theme::ThemeScope,
+) -> zgx::widgets::AtomStyle {
+    let color = |value: &Value| match crate::node::themed_color(value)? {
+        zgx::theme::Themed::Value(color) => Some(color),
+        zgx::theme::Themed::Token(token) => theme.get(token).color(),
+    };
+    let text = look.color.as_ref().and_then(color);
+    let icon = look.icon.as_ref().map(|icon| {
+        let data = load_svg(vm, low, &icon.src);
+        let tint = match &icon.tint {
+            Some(Value::Str(s)) if &**s == "currentColor" => text,
+            Some(tint) => color(tint),
+            None => None,
+        };
+        zgx::widgets::AtomIcon {
+            svg: match tint {
+                Some(tint) => Arc::new(data.tinted(tint)),
+                None => data,
+            },
+            size: icon.size,
+            gap: icon.gap,
+        }
+    });
+    zgx::widgets::AtomStyle {
+        color: text,
+        weight: look.weight,
+        underline: look
+            .underline
+            .as_ref()
+            .map(|(line, offset)| zgx::widgets::AtomUnderline {
+                color: line.as_ref().and_then(color),
+                offset: *offset,
+            }),
+        icon,
+        svg: look
+            .svg
+            .as_ref()
+            .map(|(src, [width, height, descent])| zgx::widgets::AtomSvg {
+                svg: load_svg(vm, low, src),
+                width: *width,
+                height: *height,
+                descent: *descent,
+            }),
+    }
+}
+/// An atom as a script reads it (`{ id, from, to, data?, style? }`,
+/// characters from 0), from `text`, the text its range is in.
+fn atom_value(
+    lua: &mlua::Lua,
+    atom: &zgx::text_edit::Atom,
+    text: &str,
+) -> mlua::Result<mlua::Table> {
+    let chars = (
+        crate::atoms::char_of_byte(text, atom.range.start),
+        crate::atoms::char_of_byte(text, atom.range.end),
+    );
+    match crate::value::to_lua(&crate::atoms::item(atom, chars), lua, false)? {
+        mlua::Value::Table(table) => Ok(table),
+        _ => lua.create_table(),
+    }
 }
 /// An exact short hex key, copied while its Lua string is on the stack.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -10240,6 +10511,14 @@ fn leaf_id(
 fn substitutions(view: View, rare: &crate::node::InputRare) -> View {
     view.autocorrect(rare.autocorrect)
         .smart_punctuation(rare.smart_punctuation)
+}
+
+/// `drop_caret = false` (internal): few textareas ask. Out of line: the
+/// element's builder inlines its common fields.
+#[cold]
+#[inline(never)]
+fn without_drop_caret(view: View) -> View {
+    view.drop_caret(false)
 }
 
 fn active_descendant(view: View, active: &Source, vm: &Rc<Vm>) -> View {

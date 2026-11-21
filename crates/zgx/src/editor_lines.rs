@@ -61,6 +61,12 @@ pub struct SpanStyle {
     pub strike: bool,
     /// A wash behind it (inline code).
     pub background: Option<crate::scene::Color>,
+    /// A line under it (a link).
+    pub underline: bool,
+    /// Its look beyond these, which few spans have (a mention's, an
+    /// equation's): its place in its editor's looks (`SpanLook`), from 1.
+    /// Four bytes, so a plain span pays for no more.
+    pub(crate) look: Option<std::num::NonZeroU32>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -96,20 +102,78 @@ impl SpanStyle {
         self.background = Some(color);
         self
     }
+    /// A line under its text.
+    pub const fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+    /// Its text shown as picture `id` (`EditorHandle::inline_svg`): each
+    /// U+FFFC character in it that picture's box, or other text one box.
+    #[doc(hidden)]
+    pub const fn inline_svg(mut self, id: std::num::NonZeroU32) -> Self {
+        self.look = Some(id);
+        self
+    }
     fn merge(&mut self, style: &SpanStyle) {
         self.color = self.color.or(style.color);
         self.weight = self.weight.or(style.weight);
         self.italic |= style.italic;
         self.strike |= style.strike;
         self.background = self.background.or(style.background);
+        self.underline |= style.underline;
+        self.look = self.look.or(style.look);
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
-        self.weight.is_none() && !self.italic && !self.strike && self.background.is_none()
+        self.weight.is_none()
+            && !self.italic
+            && !self.strike
+            && self.background.is_none()
+            && !self.underline
+            && self.look.is_none()
     }
-    /// Whether it changes how its text is shaped (and so its width).
+    /// Whether it changes how its text is shaped (and so its width): a
+    /// look may (its lead, its picture).
     fn shapes(&self) -> bool {
-        self.weight.is_some() || self.italic
+        self.weight.is_some() || self.italic || self.look.is_some()
+    }
+}
+/// A span's look beyond its `SpanStyle`, which few spans have: kept once in
+/// its editor's looks (`LineCache::look`), which a span names
+/// (`SpanStyle::look`), so the spans of plain text stay small.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SpanLook {
+    /// Its underline's colour, its thickness then the font's (a
+    /// mention's): an underline with neither this nor an offset is one
+    /// point thick in the text's colour.
+    pub(crate) underline_color: Option<crate::scene::Color>,
+    /// How far below the baseline its underline sits, in points.
+    pub(crate) underline_offset: Option<f32>,
+    /// Room before its text only, in points: where an atom's leading icon
+    /// draws (`AtomStyle::icon`); it moves with the text's first word.
+    pub(crate) lead: Option<f32>,
+    /// Its text shown as a picture (an equation, an atom's): over U+FFFC
+    /// characters, each one that picture's box; over other text, the span's
+    /// text one box, its text kept for copy and search.
+    pub(crate) picture: Option<Picture>,
+}
+impl SpanLook {
+    /// Whether it adds nothing.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.underline_color.is_none()
+            && self.underline_offset.is_none()
+            && self.lead.is_none()
+            && self.picture.is_none()
+    }
+    /// Whether it is `other` (the same picture, not an equal one).
+    fn same(&self, other: &SpanLook) -> bool {
+        self.underline_color == other.underline_color
+            && self.underline_offset == other.underline_offset
+            && self.lead == other.lead
+            && match (&self.picture, &other.picture) {
+                (Some((a, at)), Some((b, bt))) => std::sync::Arc::ptr_eq(a, b) && at == bt,
+                (a, b) => a.is_none() && b.is_none(),
+            }
     }
 }
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
@@ -130,6 +194,37 @@ pub(crate) fn span_highlighter(highlighter: Highlighter) -> SpanHighlighter {
     })
 }
 
+/// The atoms' spans (`atoms`, over the whole text by start) a line over
+/// `line` holds, in its own bytes, before the highlighter's `colors` (so an
+/// atom's style wins where both set something), by start.
+#[inline(never)]
+fn atoms_on_line(
+    atoms: &LineSpans,
+    line: Range<usize>,
+    colors: Option<Rc<LineSpans>>,
+) -> Option<Rc<LineSpans>> {
+    let first = atoms.partition_point(|(range, _)| range.end <= line.start);
+    let mut spans: LineSpans = atoms[first..]
+        .iter()
+        .take_while(|(range, _)| range.start < line.end)
+        .filter(|(range, _)| range.end > line.start)
+        .map(|(range, style)| {
+            let start = range.start.max(line.start) - line.start;
+            let end = range.end.min(line.end) - line.start;
+            (start..end, *style)
+        })
+        .filter(|(range, _)| !range.is_empty())
+        .collect();
+    if spans.is_empty() {
+        return colors;
+    }
+    if let Some(colors) = colors {
+        spans.extend(colors.iter().cloned());
+        // Stable: at one start, the atom's first.
+        spans.sort_by_key(|(range, _)| range.start);
+    }
+    Some(Rc::new(spans))
+}
 /// `line`'s runs as `spans` (in order by start, on its character
 /// boundaries) style them, overlapping spans merged: each run's range, and
 /// its style (`None` for the editor's own).
@@ -187,6 +282,7 @@ pub(crate) fn styled_line(
     color: crate::scene::Color,
     size: f32,
     font: &crate::text_layout::FontStyle,
+    looks: &[SpanLook],
 ) -> Option<crate::rich_text::RichText> {
     if line.is_empty() || spans.is_empty() {
         return None;
@@ -219,7 +315,16 @@ pub(crate) fn styled_line(
         }
         return crate::rich_text::RichText::new(line, runs).ok();
     }
-    let runs: Vec<_> = runs(line, spans)
+    let mut styled = runs(line, spans);
+    let boxes = if styled
+        .iter()
+        .any(|(_, s)| s.is_some_and(|s| s.look.is_some()))
+    {
+        picture_runs(line, &mut styled, looks, size)
+    } else {
+        Vec::new()
+    };
+    let runs: Vec<_> = styled
         .into_iter()
         .map(|(range, style)| {
             let style = style.unwrap_or_default();
@@ -228,18 +333,123 @@ pub(crate) fn styled_line(
                 font.weight = weight.clamp(1, 1000);
             }
             font.italic |= style.italic;
+            let look = style.look.and_then(|id| look(looks, id));
+            // A lead is room before only: half of it across (its run is one
+            // grapheme, so as much in all), negative down (`TextRun::padding`).
+            let padding = match look.and_then(|look| look.lead) {
+                Some(lead) if lead > 0. => [lead / 2., -1.],
+                _ => [0.; 2],
+            };
             crate::rich_text::TextRun {
                 range,
                 font,
                 font_size: size,
                 color: style.color.unwrap_or(color),
                 background: style.background,
+                padding,
+                underline: style.underline.then(|| underline(look)),
                 strikethrough: style.strike.then(|| crate::rich_text::Decoration::new(1.)),
                 ..Default::default()
             }
         })
         .collect();
-    crate::rich_text::RichText::new(line, runs).ok()
+    crate::rich_text::RichText::new(line, runs)
+        .ok()?
+        .with_inline_boxes(boxes)
+        .ok()
+}
+/// A picture a span's text shows as (`SpanLook::picture`): its SVG and its
+/// `[width, height, descent]` in EM.
+pub(crate) type Picture = (std::sync::Arc<crate::svg::SvgData>, [f32; 3]);
+/// The look `id` names among `looks`.
+fn look(looks: &[SpanLook], id: std::num::NonZeroU32) -> Option<&SpanLook> {
+    looks.get(id.get() as usize - 1)
+}
+/// `styled`'s pictures (`SpanLook::picture`) as runs of their own and
+/// their boxes: each U+FFFC character a box of its own, other text the
+/// span's whole text one box. Rare, out of line.
+#[cold]
+#[inline(never)]
+fn picture_runs(
+    line: &str,
+    styled: &mut Vec<(Range<usize>, Option<SpanStyle>)>,
+    looks: &[SpanLook],
+    size: f32,
+) -> Vec<crate::rich_text::InlineBox> {
+    use crate::rich_text::{INLINE_BOX_CHAR, INLINE_BOX_TEXT, InlineBox};
+    let mut out: Vec<(Range<usize>, Option<SpanStyle>)> = Vec::with_capacity(styled.len());
+    let mut boxes = Vec::new();
+    // The last run out is a box over text, of this look.
+    let mut over_text = None;
+    for (range, style) in styled.drain(..) {
+        let pictured = style.and_then(|s| s.look).and_then(|id| {
+            let (_, [w, h, d]) = look(looks, id)?.picture.as_ref()?;
+            Some((id, [*w, *h, *d]))
+        });
+        let starts_boxed = line[range.clone()].starts_with(INLINE_BOX_CHAR);
+        let a_box = |at: usize, [w, h, d]: [f32; 3]| InlineBox {
+            width: w * size,
+            height: h * size,
+            baseline: (h - d) * size,
+            ..InlineBox::new(at)
+        };
+        match (pictured, out.last_mut()) {
+            // A box over text: one run, whatever else styles parts of it.
+            (Some((id, _)), Some((last, _)))
+                if !starts_boxed && over_text == Some(id) && last.end == range.start =>
+            {
+                last.end = range.end;
+            }
+            // Over replacement characters: each one a run and a box of its
+            // own, the text between them the span's but no box.
+            (Some((_, extents)), _) if starts_boxed => {
+                over_text = None;
+                let mut at = range.start;
+                for (offset, c) in line[range.clone()].char_indices() {
+                    let here = range.start + offset;
+                    if c == INLINE_BOX_CHAR {
+                        if at < here {
+                            out.push((at..here, style));
+                        }
+                        boxes.push(a_box(here, extents));
+                        out.push((here..here + INLINE_BOX_TEXT.len(), style));
+                        at = here + INLINE_BOX_TEXT.len();
+                    }
+                }
+                if at < range.end {
+                    out.push((at..range.end, style));
+                }
+            }
+            // Over text: one box, at its start.
+            (Some((id, extents)), _) => {
+                over_text = Some(id);
+                boxes.push(a_box(range.start, extents));
+                out.push((range, style));
+            }
+            _ => {
+                over_text = None;
+                out.push((range, style));
+            }
+        }
+    }
+    *styled = out;
+    boxes
+}
+/// An underline in `look`'s colour and place: one point thick in its
+/// text's colour, or the font's thickness when it says either.
+fn underline(look: Option<&SpanLook>) -> crate::rich_text::Decoration {
+    let (color, offset) = look.map_or((None, None), |l| (l.underline_color, l.underline_offset));
+    if color.is_none() && offset.is_none() {
+        return crate::rich_text::Decoration::new(1.);
+    }
+    let mut line = crate::rich_text::Decoration::default();
+    if let Some(color) = color {
+        line = line.color(color);
+    }
+    if let Some(offset) = offset {
+        line = line.offset(offset);
+    }
+    line
 }
 /// What shapes a styled line beyond its text: its runs' weights and
 /// slants (`None`: it shapes as its plain text does).
@@ -257,6 +467,7 @@ fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
                     r.end as u32,
                     s.weight.unwrap_or(0),
                     s.italic,
+                    s.look.map_or(0, std::num::NonZeroU32::get),
                 )
             })
             .collect(),
@@ -305,6 +516,12 @@ pub(crate) struct LineCache {
     /// The editor's text revision `last` is of, if it is its committed text.
     last_revision: Cell<Option<u64>>,
     highlighter: RefCell<Option<SpanHighlighter>>,
+    /// Its atoms' spans and its spans' looks (`RareLines`): one pointer
+    /// until it has any.
+    rare: RefCell<crate::text_edit::RareBox<RareLines>>,
+    /// Whether `rare` holds anything: asked first, so a line of an editor
+    /// without atoms or looks reads no `RefCell` for them.
+    rare_set: Cell<bool>,
     /// The highlighter has given a span that shapes its line (a weight,
     /// italics): only then is a line asked for its spans as it is shaped,
     /// so one that only colours costs what it did. `restyled`: it just
@@ -320,6 +537,19 @@ pub(crate) struct LineCache {
     /// Highlighted lines, by their text and what the line before left.
     colored: RefCell<HashMap<(Box<str>, u32), Colored>>,
 }
+/// What few editors' lines have (`LineCache::rare`): their atoms' spans
+/// and their spans' looks.
+#[derive(Default)]
+struct RareLines {
+    /// Spans its atoms' styles give (`AtomStyle`), over the whole text by
+    /// start: each line takes those it holds before the highlighter's.
+    atom_spans: Option<Rc<LineSpans>>,
+    /// Its spans' looks (`SpanStyle::look` names one by its place here,
+    /// from 1): an atom's, a highlighter's picture. Only added to, so a
+    /// name stays the look's; `pictured`: one holds a picture.
+    looks: Vec<SpanLook>,
+    pictured: bool,
+}
 /// What the lines below an edit left before it (`LineCache::edited`).
 struct Tail {
     /// The line the first of them is now.
@@ -331,7 +561,7 @@ struct Tail {
 /// A shaped line, and when it was last used.
 type Shaped = (Rc<dyn TextLayout>, u64);
 /// What shapes a styled line's runs: each one's range, weight and slant.
-type ShapeKey = Box<[(u32, u32, u16, bool)]>;
+type ShapeKey = Box<[(u32, u32, u16, bool, u32)]>;
 /// A styled line's text and what shapes its runs (`shape_key`).
 type StyledKey = (Box<str>, ShapeKey);
 /// A highlighted line: its colours, what it leaves the next, when used.
@@ -492,6 +722,99 @@ impl LineCache {
     }
     pub(crate) fn highlighted(&self) -> bool {
         self.highlighter.borrow().is_some()
+            || (self.rare_set.get()
+                && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.atom_spans.is_some()))
+    }
+    /// The name a span gives `look` (`SpanStyle::look`): the same for the
+    /// same look.
+    pub(crate) fn look(&self, look: SpanLook) -> std::num::NonZeroU32 {
+        let mut rare = self.rare.borrow_mut();
+        let rare = rare.get_or_insert_default();
+        self.rare_set.set(true);
+        let at = match rare.looks.iter().position(|known| known.same(&look)) {
+            Some(at) => at,
+            None => {
+                rare.pictured |= look.picture.is_some();
+                rare.looks.push(look);
+                rare.looks.len() - 1
+            }
+        };
+        std::num::NonZeroU32::new(at as u32 + 1).expect("a look's name")
+    }
+    /// The name a span gives `svg` at `extents` (`[width, height, descent]`
+    /// in EM) to show as a picture (`SpanStyle::inline_svg`): the same for
+    /// the same picture at the same size.
+    pub(crate) fn picture(
+        &self,
+        svg: std::sync::Arc<crate::svg::SvgData>,
+        extents: [f32; 3],
+    ) -> std::num::NonZeroU32 {
+        self.look(SpanLook {
+            picture: Some((svg, extents)),
+            ..SpanLook::default()
+        })
+    }
+    /// Its spans' looks, as `SpanStyle::look` names them.
+    pub(crate) fn looks(&self) -> std::cell::Ref<'_, [SpanLook]> {
+        std::cell::Ref::map(self.rare.borrow(), |rare| {
+            rare.as_ref().map_or(&[][..], |rare| &rare.looks[..])
+        })
+    }
+    /// Whether one of its looks is a picture.
+    pub(crate) fn pictured(&self) -> bool {
+        self.rare_set.get() && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.pictured)
+    }
+    /// Whether it has looks or atom spans at all (`looks` is empty without).
+    pub(crate) fn has_rare(&self) -> bool {
+        self.rare_set.get()
+    }
+    /// Where the pictures on the lines between `top` and `bottom` show,
+    /// in the area's points, and what each is: every box a span's picture
+    /// holds (an atom's, a highlighter's).
+    pub(crate) fn pictures_between(
+        &self,
+        layout: &LinesLayout,
+        top: f32,
+        bottom: f32,
+        size: f32,
+    ) -> Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> {
+        if !self.pictured() {
+            return Vec::new();
+        }
+        let mut shown = Vec::new();
+        for i in layout.lines_between(top, bottom) {
+            let Some(spans) = self.spans(layout, i) else {
+                continue;
+            };
+            for (at, x, y) in layout.line(i).inline_boxes() {
+                let looks = self.looks();
+                let Some((svg, [w, h, _])) = spans
+                    .iter()
+                    .filter(|(range, _)| range.contains(&at))
+                    .find_map(|(_, style)| look(&looks, style.look?)?.picture.as_ref())
+                else {
+                    continue;
+                };
+                let rect = layout.shift(i, Rect::new(x, y, w * size, h * size));
+                shown.push((rect, svg.clone()));
+            }
+        }
+        shown
+    }
+    /// Its atoms' spans over the whole text, by start (none: no atom styled).
+    pub(crate) fn set_atom_spans(&self, spans: Option<LineSpans>) {
+        if let Some(spans) = &spans
+            && !self.shapes.get()
+            && spans.iter().any(|(_, style)| style.shapes())
+        {
+            self.shapes.set(true);
+            self.restyled.set(true);
+        }
+        let mut rare = self.rare.borrow_mut();
+        if spans.is_some() || rare.is_some() {
+            rare.get_or_insert_default().atom_spans = spans.map(Rc::new);
+            self.rare_set.set(true);
+        }
     }
     /// Whether a line's spans shape it now that did not before: what was
     /// laid out without them is laid out again.
@@ -501,6 +824,27 @@ impl LineCache {
     /// Line `i`'s spans, if it has a highlighter: what the lines above
     /// it leave found first (each once, until one changes).
     pub(crate) fn spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
+        if self.rare_set.get() {
+            return self.spans_with_atoms(layout, i);
+        }
+        self.highlighted_spans(layout, i)
+    }
+    /// `spans` of an editor whose atoms have spans: its atoms' before its
+    /// highlighter's. Rare, out of line.
+    #[cold]
+    #[inline(never)]
+    fn spans_with_atoms(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
+        let atoms = (self.rare.borrow().as_ref()).and_then(|rare| rare.atom_spans.clone());
+        let colors = self.highlighted_spans(layout, i);
+        let Some(atoms) = atoms else {
+            return colors;
+        };
+        atoms_on_line(&atoms, layout.line_range(i), colors)
+    }
+    /// Line `i`'s highlighter spans, if it has one. In `spans` itself, as
+    /// before atoms: a call of its own cost every line drawn.
+    #[inline(always)]
+    fn highlighted_spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
         let highlight = self.highlighter.borrow().clone()?;
         loop {
             let known = self.states.borrow().len();
@@ -593,7 +937,14 @@ impl LineCache {
             let shaping = shaping.as_ref()?;
             (f32::from_bits(shaping.size), shaping.font.clone())
         };
-        let rich = styled_line(text, &spans, crate::scene::Color(0, 0, 0, 255), size, &font)?;
+        let rich = styled_line(
+            text,
+            &spans,
+            crate::scene::Color(0, 0, 0, 255),
+            size,
+            &font,
+            &self.looks(),
+        )?;
         let shaped: Rc<dyn TextLayout> = (layout.rich)(&rich, layout.wrap).into();
         let mut styled = self.styled.borrow_mut();
         evict(&mut styled);
@@ -1024,6 +1375,17 @@ impl TextLayout for LinesLayout {
 mod tests {
     use super::*;
 
+    /// A highlighted line's spans are this big and no bigger: main's
+    /// sixteen bytes, an underline, and a four-byte name of the rare rest
+    /// (`SpanLook`: an underline's colour and place, a lead, a picture). A
+    /// span and its range stay forty bytes.
+    #[test]
+    fn span_style_stays_its_size() {
+        assert_eq!(std::mem::size_of::<Option<std::num::NonZeroU32>>(), 4);
+        assert_eq!(std::mem::size_of::<SpanStyle>(), 24);
+        assert_eq!(std::mem::size_of::<(Range<usize>, SpanStyle)>(), 40);
+    }
+
     /// Spans that only colour give their runs as before styles: in order,
     /// an earlier span keeping what a later one overlaps, the rest the
     /// editor's colour.
@@ -1037,7 +1399,7 @@ mod tests {
         );
         let spans: LineSpans = vec![(1..4, red.into()), (2..6, blue.into())];
         let font = crate::text_layout::FontStyle::default();
-        let rich = styled_line("abcdefgh", &spans, ink, 14., &font).unwrap();
+        let rich = styled_line("abcdefgh", &spans, ink, 14., &font, &[]).unwrap();
         let runs: Vec<_> = rich
             .runs()
             .iter()

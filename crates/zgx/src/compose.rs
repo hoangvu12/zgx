@@ -133,10 +133,41 @@ pub(crate) struct Environment {
     typography: Signal<Typography>,
     registry: Registry,
     portal: Option<(NodeId, Signal<bool>)>,
-    menu: Option<Rc<crate::compose_menu::MenuContext>>,
+    /// The menu around it and whether an ancestor is disabled (`EnvRare`):
+    /// one pointer, `None` in most subtrees.
+    rare: Option<Rc<EnvRare>>,
     measure: crate::rich_text::TextMeasure,
     /// The theme scope styles in this subtree resolve tokens from.
     pub(crate) theme: Rc<crate::theme::ThemeScope>,
+}
+/// What few subtrees' environments hold, behind one pointer: the
+/// environment is cloned for every mount, so it stays small.
+#[derive(Clone, Default)]
+struct EnvRare {
+    menu: Option<Rc<crate::compose_menu::MenuContext>>,
+    /// Whether an ancestor is disabled, read where it is asked (tracked):
+    /// only below a view that can be disabled (`View::disabled_when`).
+    disabled: Option<Rc<dyn Fn() -> bool>>,
+}
+impl Environment {
+    /// The menu this subtree is in.
+    pub(crate) fn menu(&self) -> Option<Rc<crate::compose_menu::MenuContext>> {
+        self.rare.as_ref()?.menu.clone()
+    }
+    pub(crate) fn set_menu(&mut self, menu: Option<Rc<crate::compose_menu::MenuContext>>) {
+        let mut rare = self.rare.as_deref().cloned().unwrap_or_default();
+        rare.menu = menu;
+        self.rare = Some(Rc::new(rare));
+    }
+    /// Whether an ancestor is disabled, if one can be.
+    fn disabled_above(&self) -> Option<Rc<dyn Fn() -> bool>> {
+        self.rare.as_ref()?.disabled.clone()
+    }
+    fn set_disabled_above(&mut self, disabled: Rc<dyn Fn() -> bool>) {
+        let mut rare = self.rare.as_deref().cloned().unwrap_or_default();
+        rare.disabled = Some(disabled);
+        self.rare = Some(Rc::new(rare));
+    }
 }
 /// Mount-time component context. State is allocated once; there are no positional hooks.
 pub struct Context {
@@ -512,6 +543,8 @@ enum Contents {
 type Decorations = Vec<(std::ops::Range<usize>, crate::scene::Color)>;
 /// Ranges of a text underlined (`View::underlines`).
 type Underlines = Vec<crate::widgets::EditorUnderline>;
+/// What gives a text area's atoms as the values it reads change.
+type AtomsFollow = Box<dyn FnMut(&mut crate::text_edit::TextEditor) -> Vec<crate::text_edit::Atom>>;
 /// What a code editor adds to a text area: its lines' colours, ranges
 /// marked behind its text, its current line and what Tab inserts.
 #[derive(Default)]
@@ -523,6 +556,13 @@ pub(crate) struct CodeOptions {
     indent: Option<String>,
     on_caret: Option<Box<dyn FnMut(crate::widgets::Caret)>>,
     on_top_line: Option<Box<dyn FnMut(usize)>>,
+    atom_wash: Option<crate::scene::Color>,
+    on_atoms: Option<crate::widgets::AtomListener>,
+    atoms_when: Option<AtomsFollow>,
+    /// `on_atom_press`, `on_atom_hover`: its atoms under the pointer.
+    atom_pointer: Option<Rc<crate::editor_atom_pointer::AtomPointer>>,
+    /// `atom_style`: how its atoms show beyond a wash.
+    atom_style: Option<crate::editor_atom_style::AtomStyle>,
 }
 /// `View`'s fields few views set (`View::rare`).
 #[derive(Default)]
@@ -593,6 +633,8 @@ pub(crate) struct Rare {
     input_mode: Option<crate::text_edit::InputMode>,
     spellcheck: Option<Box<dyn FnMut() -> bool>>,
     line_numbers: Option<bool>,
+    /// `View::drop_caret`: whether dragged text moves a text area's caret.
+    drop_caret: Option<bool>,
     /// What a code editor adds to a text area (`View::highlighter`, …).
     code: Option<Box<CodeOptions>>,
     /// `WINDOW_DRAG` (`View::window_drag`), `HOLLOW` (`View::hollow`),
@@ -643,6 +685,25 @@ fn merge_accessibility(
     }
 }
 impl Rare {
+    /// Its text area's atoms' options, taken for the DOM, which shows them
+    /// itself (`ElementKind::Editor`): none where none is set.
+    #[cfg(feature = "dom")]
+    pub(crate) fn take_atoms(&mut self) -> Option<Box<__dom::DomAtoms>> {
+        let code = self.code.as_deref_mut()?;
+        if code.atoms_when.is_none()
+            && code.on_atoms.is_none()
+            && code.atom_wash.is_none()
+            && code.atom_style.is_none()
+        {
+            return None;
+        }
+        Some(Box::new(__dom::DomAtoms {
+            when: code.atoms_when.take(),
+            on_atoms: code.on_atoms.take(),
+            wash: code.atom_wash.take(),
+            style: code.atom_style.take(),
+        }))
+    }
     /// `View::refine`'s part: what an outer view sets over its inner one.
     fn merge_into(self, inner: &mut Rare) {
         if self.trigger_id.is_some() {
@@ -1527,6 +1588,20 @@ impl View {
         accessibility.level = Some(level.max(1));
         self
     }
+    /// A tree item's depth, 1 for the top (`aria-level`): virtualised rows
+    /// are flat siblings, so a reader can't infer it.
+    #[doc(hidden)]
+    pub fn level(mut self, level: usize) -> Self {
+        self.accessibility_mut().level = Some(level.max(1));
+        self
+    }
+    /// [`View::level`], followed: a row whose depth changes in place (moved
+    /// into another branch) is read at its new depth, without a rebuild.
+    #[doc(hidden)]
+    pub fn level_when(mut self, level: impl FnMut() -> usize + 'static) -> Self {
+        self.accessibility_mut().level_when = Some(Box::new(level));
+        self
+    }
     /// Whether this option, tab or item is the chosen one, followed
     /// (`aria-selected`).
     pub fn selected_when(mut self, selected: impl FnMut() -> bool + 'static) -> Self {
@@ -1919,6 +1994,15 @@ impl View {
         self.rare_mut().line_numbers = Some(numbered);
         self
     }
+    /// Whether text dragged over a text area moves its caret to where it
+    /// would drop (on by default). Off, the drag is still taken and drops
+    /// where it is let go, the caret and selection staying where they were
+    /// meanwhile: the app shows where it would drop. (Pin line.)
+    #[doc(hidden)]
+    pub fn drop_caret(mut self, shows: bool) -> Self {
+        self.rare_mut().drop_caret = Some(shows);
+        self
+    }
     fn code_mut(&mut self) -> &mut CodeOptions {
         self.rare_mut().code.get_or_insert_with(Default::default)
     }
@@ -1985,6 +2069,78 @@ impl View {
     /// status bar's line and column); see `EditorHandle::on_caret`.
     pub fn on_caret(mut self, told: impl FnMut(crate::widgets::Caret) + 'static) -> Self {
         self.code_mut().on_caret = Some(Box::new(told));
+        self
+    }
+    /// The wash behind a text area's atoms that have none of their own.
+    pub fn atom_wash(mut self, color: crate::scene::Color) -> Self {
+        self.code_mut().atom_wash = Some(color);
+        self
+    }
+    /// Call `told` with what happened to a text area's atoms and all of them
+    /// as they are, whenever they are made, lost or moved; see
+    /// `EditorHandle::on_atoms`.
+    pub fn on_atoms(mut self, told: impl FnMut(&crate::widgets::AtomEvent<'_>) + 'static) -> Self {
+        self.code_mut().on_atoms = Some(Box::new(told));
+        self
+    }
+    /// How a text area's atoms show beyond a wash: a mention's colour,
+    /// weight, underline and leading icon (`EditorHandle::set_atom_style`).
+    #[doc(hidden)]
+    pub fn atom_style(mut self, style: crate::editor_atom_style::AtomStyle) -> Self {
+        self.code_mut().atom_style = Some(style);
+        self
+    }
+    /// Call `told` when a primary press on one of a text area's atoms is let
+    /// go in place (within 4 points, no text dragged over): true takes it,
+    /// and the caret stays where it was, out of the chip.
+    pub fn on_atom_press(
+        mut self,
+        told: impl FnMut(&crate::widgets::AtomPress<'_>) -> bool + 'static,
+    ) -> Self {
+        let (pointer, new) = self.atom_pointer();
+        pointer.set_press(told);
+        if new {
+            self.on_event(move |cx| pointer.event(cx))
+        } else {
+            self
+        }
+    }
+    /// Call `told` when the pointer comes onto one of a text area's atoms
+    /// (another, or the same one's box on another line), with its box on
+    /// the line under the pointer, and with none when it leaves it; again
+    /// when a scroll or a new layout moves the one under it.
+    pub fn on_atom_hover(
+        mut self,
+        told: impl FnMut(&crate::widgets::AtomHover<'_>) + 'static,
+    ) -> Self {
+        let (pointer, new) = self.atom_pointer();
+        pointer.set_hover(told);
+        if new {
+            self.on_event(move |cx| pointer.event(cx))
+        } else {
+            self
+        }
+    }
+    /// Its atoms' pointer listeners, made now if they weren't (`true`).
+    fn atom_pointer(&mut self) -> (Rc<crate::editor_atom_pointer::AtomPointer>, bool) {
+        let code = self.code_mut();
+        let new = code.atom_pointer.is_none();
+        let pointer = code
+            .atom_pointer
+            .get_or_insert_with(Default::default)
+            .clone();
+        (pointer, new)
+    }
+    /// A text area's atoms follow what `atoms` gives, as the reactive values
+    /// it reads change (a draft restored). It is given the text area's model
+    /// (its text, its atoms now, new atoms' ids), on every target alike. The
+    /// model is borrowed while it runs: it must not reach the text area's
+    /// handle (`EditorHandle`), whose calls borrow it again.
+    pub fn atoms_when(
+        mut self,
+        atoms: impl FnMut(&mut crate::text_edit::TextEditor) -> Vec<crate::text_edit::Atom> + 'static,
+    ) -> Self {
+        self.code_mut().atoms_when = Some(Box::new(atoms));
         self
     }
     /// Call `told` with a text area's first line in view, from 1, whenever
@@ -2541,6 +2697,10 @@ impl CanvasLabels {
             .shown
             .as_ref()
             .map_or(&[][..], |shown| &shown.texts()[self.lines.clone()]);
+        // The group's place and clip, worked out for its first changed line
+        // and taken by the rest: nothing below changes them (lines' text,
+        // fonts and own places, lines added, a paragraph's box).
+        let mut shared = None;
         for (index, text) in texts.iter().enumerate() {
             // Each node shows the line at its place in the last drawing.
             let before = was.get(index).filter(|_| index < self.nodes.len());
@@ -2551,17 +2711,23 @@ impl CanvasLabels {
                 Self::show_paragraph(scene, group, &mut self.nodes, index, text, before);
                 continue;
             }
-            let kind = NodeKind::Text {
-                text: text.text.clone(),
-                color: text.color,
-                font_size: text.size,
-            };
             let node = match self.nodes.get(index) {
                 Some(&node) => {
-                    scene.set_kind(node, kind);
+                    scene.set_text_kind_sharing(
+                        node,
+                        text.text.clone(),
+                        text.color,
+                        text.size,
+                        &mut shared,
+                    );
                     node
                 }
                 None => {
+                    let kind = NodeKind::Text {
+                        text: text.text.clone(),
+                        color: text.color,
+                        font_size: text.size,
+                    };
                     let node = scene.append_held(
                         group,
                         kind,
@@ -4309,6 +4475,17 @@ fn merge_kept<K: Eq + std::hash::Hash + Clone>(
 #[cfg(debug_assertions)]
 thread_local! {
     static LIST_PASSES: Cell<u64> = const { Cell::new(0) };
+    static LIST_RUNS: Cell<u64> = const { Cell::new(0) };
+}
+/// How many times virtual lists' rows bindings have run so far on this
+/// thread, whether or not they placed anything (`virtual_list_passes`).
+/// Debug builds count; a release build says 0.
+#[doc(hidden)]
+pub fn virtual_list_runs() -> u64 {
+    #[cfg(debug_assertions)]
+    return LIST_RUNS.with(Cell::get);
+    #[cfg(not(debug_assertions))]
+    0
 }
 /// How many times virtual lists have placed their rows so far on this
 /// thread: a test's measure of their work. Debug builds count; a release
@@ -4409,7 +4586,27 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             if !ancestor {
                 ui.scene.borrow_mut().set_scroll_copy(content, true);
             }
-            let window = ancestor.then(|| AncestorWindow::new(ui, root, viewport));
+            let window = ancestor.then(|| Rc::new(AncestorWindow::new(ui, root, viewport)));
+            // The part the view around it shows, worked out apart from the
+            // rows: the view's every step moves every list in it, and most
+            // (scrolled past) show nothing either side of it, so their rows
+            // aren't placed again (`Signal::set` keeps an equal value).
+            let shown = window.as_ref().map(|window| {
+                let shown = ui.signal((0_f32, 0_f32));
+                let read = (shown.clone(), Cell::new(false));
+                let (window, part, extent, weak) = (
+                    window.clone(),
+                    shown.clone(),
+                    extent.clone(),
+                    ui.downgrade(),
+                );
+                ui.bind(root, move || {
+                    if let Some(now) = window.shown(&weak, extent.get()) {
+                        part.set(now);
+                    }
+                });
+                read
+            });
             let stretch = ListStretch::new(
                 ui,
                 root,
@@ -4504,6 +4701,8 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             );
             let mut handled_reveal = 0;
             ui.bind(root, move || {
+                #[cfg(debug_assertions)]
+                LIST_RUNS.with(|runs| runs.set(runs.get() + 1));
                 let length = count();
                 let (width, mut height) = size.get();
                 let model = crate::virtual_list::VirtualList::new(length, row_height, overscan);
@@ -4517,10 +4716,13 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     requested.clamp(0.0, limit)
                 };
                 // The part the view around it shows.
-                if let Some(window) = &window
-                    && let Some(shown) = window.shown(&weak, model.content_height())
-                {
-                    (position, height) = shown;
+                // Subscribed once, for as long as the rows' binding lives, and
+                // read untracked: it reads the part on every run.
+                if let Some((shown, subscribed)) = &shown {
+                    if !subscribed.replace(true) {
+                        shown.subscribe();
+                    }
+                    (position, height) = shown.with_untracked(|part| *part);
                 }
                 let request = navigation
                     .as_ref()
@@ -5226,15 +5428,10 @@ fn mount_portal_panel(
     }
     environment.portal = Some((portal.overlay, portal.visible.clone()));
     let menu_context = is_menu.then(|| {
-        crate::compose_menu::MenuContext::new(
-            open.clone(),
-            environment.menu.clone(),
-            anchor,
-            is_submenu,
-        )
+        crate::compose_menu::MenuContext::new(open.clone(), environment.menu(), anchor, is_submenu)
     });
     if let Some(menu) = &menu_context {
-        environment.menu = Some(menu.clone());
+        environment.set_menu(Some(menu.clone()));
     }
 
     let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
@@ -5370,6 +5567,13 @@ fn mount_portal_panel(
     } else {
         Vec::new()
     };
+    // A layer's content is live under a modal from its first mount, not
+    // only once `activate` below makes it a layer: a control in it that
+    // takes focus as it mounts (a presence's new content focusing its
+    // button in `on_mount`) takes it.
+    if is_layer {
+        ui.input.set_layer(portal.overlay, true);
+    }
     let panel = mount_element(
         ui,
         portal.position,
@@ -5745,6 +5949,39 @@ impl WidgetStyles {
 fn dim_when_disabled(view: &mut View) {
     if view.variants.disabled.is_none() {
         view.variants.disabled = Some(Box::new(Styles::new().opacity(0.45)));
+    }
+}
+/// A view disabled, or under one that is: what its children read (an
+/// ancestor disabled, followed), and what its style reads, as a node
+/// disabled itself is when it has disabled styles of its own: it or an
+/// ancestor disabled. A node with no disabled style reads nothing of its
+/// ancestors (input and assistive technology walk them).
+#[cold]
+#[inline(never)]
+fn inherit_disabled(
+    ui: &mut Ui,
+    root: NodeId,
+    environment: &mut Environment,
+    own: Option<Box<dyn FnMut() -> bool>>,
+    variants: &crate::compose_style::Variants,
+) -> Option<Box<dyn FnMut() -> bool>> {
+    let above = environment.disabled_above();
+    if own.is_some() {
+        let here = ui.input.observe_disabled(root, &ui.runtime);
+        let up = above.clone();
+        environment.set_disabled_above(Rc::new(move || {
+            here.get() || up.as_ref().is_some_and(|up| up())
+        }));
+    }
+    let Some(above) = above else {
+        return own;
+    };
+    match own {
+        Some(mut own) => Some(Box::new(move || own() || above())),
+        None if variants.disabled.is_some() || variants.reactive.is_some() => {
+            Some(Box::new(move || above()))
+        }
+        None => None,
     }
 }
 fn widget_style(pick: impl FnOnce(&WidgetStyles) -> &Styles) -> Styles {
@@ -6604,7 +6841,7 @@ fn open_element(
     // A trigger drawn by the app (`View::trigger`) shows its own chevron.
     let submenu_indicator = is_submenu_trigger && view.children.is_empty();
     // Outside a menu (a popover's list) an item is a plain action.
-    let item_menu = is_menu_item.then(|| environment.menu.clone()).flatten();
+    let item_menu = is_menu_item.then(|| environment.menu()).flatten();
     let is_editor = matches!(kind, Kind::Editor { .. });
     assert!(
         rare.as_deref().is_none_or(|r| r.read_only.is_none()) || is_editor,
@@ -6637,8 +6874,10 @@ fn open_element(
         "select_on_focus is only supported on editor views"
     );
     assert!(
-        rare.as_deref().is_none_or(|r| r.line_numbers.is_none()) || is_editor,
-        "line_numbers is only supported on editor views"
+        rare.as_deref()
+            .is_none_or(|r| r.line_numbers.is_none() && r.drop_caret.is_none())
+            || is_editor,
+        "line_numbers and drop_caret are only supported on editor views"
     );
     assert!(
         rare.as_deref().is_none_or(|r| r.code.is_none()) || is_editor,
@@ -7041,10 +7280,10 @@ fn open_element(
         }
         _ => unreachable!(),
     };
-    if view.contents != Contents::Own
+    let as_child = view.contents != Contents::Own
         && (view.contents == Contents::Child
-            || (view.styles.set_bits() == 0 && view.reactive_style.is_none()))
-    {
+            || (view.styles.set_bits() == 0 && view.reactive_style.is_none()));
+    if as_child {
         ui.scene.borrow_mut().set_contents(root, true);
     }
     if let Some(active) = rare.as_deref_mut().and_then(|r| r.active_descendant.take()) {
@@ -7232,6 +7471,14 @@ fn open_element(
         false => rare.as_deref_mut().and_then(|r| r.layout_target.take()),
     };
     let image_fit = is_image.then(|| ui.signal(crate::style::ImagePlacement::default()));
+    if view.disabled.is_some()
+        || environment
+            .rare
+            .as_ref()
+            .is_some_and(|r| r.disabled.is_some())
+    {
+        view.disabled = inherit_disabled(ui, root, &mut environment, view.disabled, &view.variants);
+    }
     environment.typography = mount_style_with_intrinsic(
         ui,
         root,
@@ -7246,6 +7493,7 @@ fn open_element(
         image_fit.clone(),
         Some(environment.theme.clone()),
         leaf,
+        as_child,
     );
     if let Some(compute) = rich_compute {
         mount_rich(
@@ -7417,6 +7665,9 @@ fn open_element(
         if let Some(numbered) = rare.as_deref().and_then(|r| r.line_numbers) {
             editor.set_line_numbers(numbered);
         }
+        if let Some(shows) = rare.as_deref().and_then(|r| r.drop_caret) {
+            editor.set_drop_caret(shows);
+        }
         if let Some(code) = rare.as_deref_mut().and_then(|r| r.code.take()) {
             let CodeOptions {
                 highlighter,
@@ -7426,6 +7677,11 @@ fn open_element(
                 indent,
                 on_caret,
                 on_top_line,
+                atom_wash,
+                on_atoms,
+                atoms_when,
+                atom_pointer,
+                atom_style,
             } = *code;
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
@@ -7446,6 +7702,25 @@ fn open_element(
             }
             if let Some(told) = on_top_line {
                 editor.on_top_line(told);
+            }
+            if let Some(color) = atom_wash {
+                editor.set_atom_wash(Some(color));
+            }
+            if let Some(told) = on_atoms {
+                editor.on_atoms(told);
+            }
+            if let Some(pointer) = atom_pointer {
+                pointer.attach(editor.clone());
+            }
+            if atom_style.is_some() {
+                editor.set_atom_style(atom_style);
+            }
+            if let Some(mut atoms) = atoms_when {
+                let editor = editor.clone();
+                ui.bind(root, move || {
+                    let next = atoms(&mut editor.editor.borrow_mut());
+                    editor.set_atoms(next)
+                });
             }
             editor.set_indent(indent.as_deref());
             if let Some(mut ranges) = decorations {
@@ -7931,7 +8206,8 @@ impl ListStretch {
 /// How far scroll view `viewport` (the node holding its content) moves its
 /// content along its axis so focused `target` inside shows: the least
 /// (CSS's `nearest`), the view's `scroll_padding` kept clear; 0 where it
-/// shows, or spans the view. None if either is gone.
+/// shows, or spans the view. None if either is gone. The rule and the
+/// padding are `NodeHandle::scroll_into_view`'s (`scroll_reveal`).
 pub(crate) fn focus_movement(
     ui: &Ui,
     target: NodeId,
@@ -7944,34 +8220,12 @@ pub(crate) fn focus_movement(
         return None;
     }
     let target = scene.bounds(target);
-    let visible = scene.bounds(viewport);
-    let (target_start, target_size, visible_start, visible_size) = if horizontal {
-        let size = (visible.width - padding.left - padding.right).max(0.);
-        (target.x, target.width, visible.x + padding.left, size)
-    } else {
-        let size = (visible.height - padding.top - padding.bottom).max(0.);
-        (target.y, target.height, visible.y + padding.top, size)
+    let shown = crate::scroll_reveal::padded(scene.bounds(viewport), padding);
+    let (start, size, from, length) = match horizontal {
+        true => (target.x, target.width, shown.x, shown.width),
+        false => (target.y, target.height, shown.y, shown.height),
     };
-    let start_delta = target_start as f64 - visible_start as f64;
-    let end_delta =
-        target_start as f64 + target_size as f64 - visible_start as f64 - visible_size as f64;
-    Some(if start_delta < 0. && end_delta > 0. {
-        0. // Oversized targets already spanning the viewport stay put.
-    } else if start_delta < 0. {
-        if target_size > visible_size {
-            end_delta
-        } else {
-            start_delta
-        }
-    } else if end_delta > 0. {
-        if target_size > visible_size {
-            start_delta
-        } else {
-            end_delta
-        }
-    } else {
-        0.
-    })
+    Some(crate::scroll_reveal::shift(RowAlign::Nearest, start, size, from, length, 0.) as f64)
 }
 /// Where a list that scrolls with the scroll view around it
 /// (`View::virtualize_in_ancestor`) shows: its viewport's place, and those
@@ -8047,7 +8301,9 @@ impl AncestorWindow {
             _ => {
                 #[cfg(test)]
                 WINDOW_CLIP_WALKS.with(|walks| walks.set(walks.get() + 1));
-                scene.visible_bounds(self.viewport)
+                // However transparent: rows under an ancestor fading in
+                // are built as it starts, not once something moves.
+                scene.clipped_bounds_shown(self.viewport)
             }
         };
         match shown {
@@ -9118,6 +9374,8 @@ type NumericValue = Box<dyn FnMut() -> f64>;
 pub(crate) struct Accessibility {
     role: Option<Role>,
     level: Option<usize>,
+    /// `View::level_when`: a depth worked out from state.
+    level_when: Option<Box<dyn FnMut() -> usize>>,
     selected: Option<Box<dyn FnMut() -> bool>>,
     checked: Option<Box<dyn FnMut() -> bool>>,
     radio_item: bool,
@@ -9151,6 +9409,9 @@ impl Accessibility {
         }
         if outer.level.is_some() {
             inner.level = outer.level;
+        }
+        if outer.level_when.is_some() {
+            inner.level_when = outer.level_when;
         }
         if outer.selected.is_some() {
             inner.selected = outer.selected;
@@ -9228,6 +9489,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
     let Accessibility {
         role,
         level,
+        level_when,
         selected,
         mut checked,
         radio_item,
@@ -9313,6 +9575,18 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut level) = level_when {
+        let tree = ui.semantics.clone();
+        let assistive = assistive.clone();
+        ui.bind(root, move || {
+            if !assistive.get() {
+                return;
+            }
+            let level = level().max(1);
+            tree.borrow_mut()
+                .update(root, |node| node.level = Some(level));
         });
     }
     if let Some(mut description) = description_when {
@@ -9838,6 +10112,38 @@ impl NodeHandle {
     pub fn snapshot(&self, max_width: u32) -> Option<std::sync::Arc<crate::image::ImageData>> {
         self.ui.upgrade()?.snapshot(self.node, max_width)
     }
+    /// A picture of `rect` of the node, in its own points (0, 0 its top
+    /// left), as the window last showed it, at most `max_width` pixels wide
+    /// (see `Ui::snapshot_area`): a dragged row's picture out of an editor
+    /// that holds many, reading and scaling only the row. What lies past
+    /// the window's edges is left out. `None` if the host takes no
+    /// pictures, the node is not laid out or is hidden, or none of `rect`
+    /// is in the window.
+    #[doc(hidden)]
+    pub fn snapshot_area(
+        &self,
+        rect: crate::scene::Rect,
+        max_width: u32,
+    ) -> Option<std::sync::Arc<crate::image::ImageData>> {
+        let ui = self.ui.upgrade()?;
+        let take = ui.snapshotter()?;
+        let area = {
+            let scene = ui.scene.borrow();
+            if !scene.contains(self.node) || !scene.layout_visible(self.node) {
+                return None;
+            }
+            let bounds = scene.bounds(self.node);
+            let inside = crate::scene::Rect::new(
+                bounds.x + rect.x,
+                bounds.y + rect.y,
+                rect.width,
+                rect.height,
+            );
+            // Where it shows, as `window_bounds` says the node does.
+            scene.window_rect(self.node, inside)
+        };
+        ui.snapshot_of(Some(self.node), take, area, max_width)
+    }
     /// Scroll the scroll views around the node, innermost first, so it shows
     /// as `how` asks, as the web's `element.scrollIntoView` does: `block`
     /// down and `inline` across each `Nearest` (as little as shows it all;
@@ -10062,7 +10368,7 @@ impl Ui {
             typography,
             registry: registry.clone(),
             portal: None,
-            menu: None,
+            rare: None,
             measure: self.scene.borrow().text_measure(),
             theme,
         };

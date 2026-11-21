@@ -1133,10 +1133,18 @@ impl Application {
         winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut event_loop, false);
         // A probe's window beside someone's work: shown, not taken to the front.
         #[cfg(target_os = "macos")]
-        if zgx::env::var_os("ZGX_NO_ACTIVATE").is_some() {
+        if zgx::env::var_os("ZGX_NO_ACTIVATE").is_some() || *crate::window_chrome::OFFSCREEN {
             winit::platform::macos::EventLoopBuilderExtMacOS::with_activate_ignoring_other_apps(
                 &mut event_loop,
                 false,
+            );
+        }
+        // Offscreen: no Dock icon and no place in Cmd-Tab either.
+        #[cfg(target_os = "macos")]
+        if *crate::window_chrome::OFFSCREEN {
+            winit::platform::macos::EventLoopBuilderExtMacOS::with_activation_policy(
+                &mut event_loop,
+                winit::platform::macos::ActivationPolicy::Accessory,
             );
         }
         let event_loop = event_loop.build()?;
@@ -1268,6 +1276,7 @@ impl Default for Application {
 /// `Occluded` and a covered window goes on drawing with or without it.
 static RENDER_WHEN_COVERED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
     zgx::env::var_os("ZGX_RENDER_WHEN_COVERED").is_some_and(|v| !v.is_empty() && v != "0")
+        || *crate::window_chrome::OFFSCREEN
 });
 /// What a window's next trim is for (`Host::trim_at`): the trim of what
 /// animation alone used, or what goes later at rest (`Rest`).
@@ -2302,7 +2311,7 @@ impl Host {
             ui.on_snapshot(move |rect, max_width| {
                 let shown = shown.borrow();
                 let (frame, scale) = shown.as_ref()?;
-                let (x, y, w, h) = snapshot_region(rect, *scale);
+                let (x, y, w, h) = zgx_gpu::pixel_region(rect, *scale);
                 let (w, h, bgra) = frame.read(x, y, w, h)?;
                 let (w, h) = (w as usize, h as usize);
                 crate::thumbnail::image(&bgra, w, h, w * 4, max_width as usize)
@@ -2318,7 +2327,7 @@ impl Host {
                     rect.width,
                     rect.height,
                 );
-                let (x, y, w, h) = snapshot_region(inside, f64::from(*scale));
+                let (x, y, w, h) = zgx_gpu::pixel_region(inside, f64::from(*scale));
                 let (w, h, bgra) = frame.read(x, y, w, h)?;
                 let (w, h) = (w as usize, h as usize);
                 crate::thumbnail::image(&bgra, w, h, w * 4, max_width as usize)
@@ -3072,6 +3081,9 @@ impl Host {
         let visible = match (self.draw_hidden, self.unmapped) {
             (true, _) => Some(true),
             (false, true) => Some(false),
+            // Off-screen, never ordered in: it draws as the app has it
+            // shown or hidden.
+            (false, false) if !crate::window_chrome::may_show() => Some(self.state.visible),
             (false, false) => window.is_visible(),
         };
         // X11's minimized query is a synchronous property roundtrip. Focused
@@ -3303,6 +3315,8 @@ impl Host {
                             result?;
                             first_mark(&FIRST_RENDER, "first frame rendered");
                             self.native.render(&scene, damage)?;
+                            // Drawn and shown at once: presented.
+                            note_first_present();
                             // Shown: the next waits for the compositor's
                             // frame, as a GPU present's does.
                             self.present_ready = false;
@@ -3479,15 +3493,7 @@ impl Host {
                     self.scale_factor,
                 );
                 self.native.apply();
-                FIRST_PRESENT.call_once(|| {
-                    let mark = first_present_mark();
-                    zgx::profile::mark(&mark);
-                    // `ZGX_SHADER_LOG=1`: the same line alone, for a probe
-                    // timing starts (ZGX_PROFILE's spans would slow them).
-                    if zgx::env::var_os("ZGX_SHADER_LOG").is_some_and(|v| v != "0") {
-                        eprintln!("zgx: {mark}");
-                    }
-                });
+                note_first_present();
                 // Commits the transaction (macOS; elsewhere there is none).
                 #[allow(dropping_copy_types)]
                 drop(transaction);
@@ -3912,8 +3918,8 @@ impl Host {
         }
     }
     /// What a standard edit item does, as its shortcut does it: the
-    /// clipboard's commands as `clipboard_command`, Select All on the
-    /// focused editor, Undo and Redo as their keys to it; full screen
+    /// clipboard's commands as `clipboard_command`, Select All as
+    /// `Ui::select_all`, Undo and Redo as their keys to it; full screen
     /// toggles the window. Whether anything took it.
     fn standard_edit(&mut self, item: crate::app_menu::StandardItem) -> bool {
         use crate::app_menu::StandardItem;
@@ -3931,12 +3937,8 @@ impl Host {
             StandardItem::Copy => self.clipboard_command("c"),
             StandardItem::Cut => self.clipboard_command("x"),
             StandardItem::Paste => self.clipboard_command("v"),
-            StandardItem::SelectAll => self
-                .context
-                .ui
-                .focused_editor()
-                .map(|editor| editor.select_all())
-                .is_some(),
+            // The focused editor's text, else a selectable region's, as ⌘A.
+            StandardItem::SelectAll => self.context.ui.select_all(),
             StandardItem::Undo | StandardItem::Redo => {
                 self.context.ui.focused_editor().is_some()
                     && self
@@ -4433,6 +4435,9 @@ impl Host {
         );
         // Left maximized, it opens so (`frame_autosave`).
         self.state.maximized |= placed.maximized;
+        if *crate::window_chrome::OFFSCREEN {
+            crate::window_chrome::send_offscreen(&window);
+        }
         let radius = crate::window_chrome::apply(
             &window,
             self.options.titlebar,
@@ -4650,7 +4655,10 @@ impl Host {
         }
         self.renderer = renderer;
         self.adapter = adapter;
-        window.set_maximized(self.state.maximized);
+        // Off-screen (`ZGX_OFFSCREEN`), not zoomed either: it is never shown.
+        if crate::window_chrome::may_show() {
+            window.set_maximized(self.state.maximized);
+        }
         // Not shown yet, an X11 window's state is its own to set.
         #[cfg(target_os = "linux")]
         if self.state.maximized {
@@ -4669,7 +4677,8 @@ impl Host {
                 self.options.bounds = Some(crate::WindowBounds::read(&window));
             }
         }
-        if self.options.fullscreen {
+        let may_show = crate::window_chrome::may_show();
+        if self.options.fullscreen && may_show {
             let display = self
                 .options
                 .display
@@ -4677,12 +4686,15 @@ impl Host {
                 .and_then(|selector| crate::window_info::select_monitor(event_loop, selector));
             window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(display)));
         }
-        window.set_visible(self.state.visible);
-        if self.state.minimized {
+        // Off-screen (`ZGX_OFFSCREEN`), made hidden, it stays so.
+        window.set_visible(self.state.visible && may_show);
+        if self.state.minimized && may_show {
             window.set_minimized(true);
         }
         if self.state.focus_requested {
-            window.focus_window();
+            if may_show {
+                window.focus_window();
+            }
             self.state.focus_requested = false;
         }
         window.request_redraw();
@@ -4842,11 +4854,22 @@ impl Host {
                 let _ = window.request_inner_size(size);
             }
             WindowCommand::Fullscreen(value) => {
-                window.set_fullscreen(value.then_some(winit::window::Fullscreen::Borderless(None)))
+                if crate::window_chrome::may_show() {
+                    window.set_fullscreen(
+                        value.then_some(winit::window::Fullscreen::Borderless(None)),
+                    )
+                }
             }
             WindowCommand::ContextMenu { entries, x, y } => {
                 #[cfg(target_os = "macos")]
-                {
+                if !crate::window_chrome::may_show() {
+                    // Off-screen: no native menu, which would show on a screen.
+                    let _ = (entries, x, y);
+                    self.context
+                        .window_info
+                        .last_request_error
+                        .set(Some("off-screen: no native menu shows".into()));
+                } else {
                     let shown = crate::app_menu::show_context_menu(window, &entries, x, y);
                     self.context
                         .window_info
@@ -4950,12 +4973,18 @@ impl Host {
                 if value {
                     self.context.ui.cancel_interactions();
                 }
-                window.set_minimized(value);
+                if crate::window_chrome::may_show() {
+                    window.set_minimized(value);
+                }
                 self.context
                     .ui
                     .set_presented(self.state.visible && !value && !self.native_occluded);
             }
-            WindowCommand::Maximized(value) => window.set_maximized(value),
+            WindowCommand::Maximized(value) => {
+                if crate::window_chrome::may_show() {
+                    window.set_maximized(value)
+                }
+            }
             WindowCommand::Visible(value) => {
                 if !value {
                     self.context.ui.cancel_interactions();
@@ -4973,7 +5002,7 @@ impl Host {
                 if showing && let Err(error) = self.draw_hidden_frame() {
                     eprintln!("zgx: {error}");
                 }
-                window.set_visible(value);
+                window.set_visible(value && crate::window_chrome::may_show());
                 if showing {
                     zgx_gpu::present_log::log(|| "window shown".into());
                     zgx::profile::mark("window shown");
@@ -4985,7 +5014,9 @@ impl Host {
                 }
             }
             WindowCommand::Focus => {
-                window.focus_window();
+                if crate::window_chrome::may_show() {
+                    window.focus_window();
+                }
                 self.state.focus_requested = false;
             }
             // Applies without a native window too: the clock outlives it.
@@ -7947,8 +7978,10 @@ impl WindowManager {
                 data.activate(token, window);
             }
         } else {
-            window.set_minimized(false);
-            window.focus_window();
+            if crate::window_chrome::may_show() {
+                window.set_minimized(false);
+                window.focus_window();
+            }
             crate::x11_startup::complete(&window, &token);
         }
     }
@@ -8359,35 +8392,17 @@ impl WindowManager {
                             paths,
                             accepted,
                         } => {
-                            let mut result = Ok(());
-                            let mut handled = false;
-                            for path in paths.iter() {
-                                if host.context.window.is_closed() {
-                                    break;
-                                }
-                                match host.dispatch_prevented(InputEvent::FileDrop {
-                                    x,
-                                    y,
-                                    path: path.clone(),
-                                }) {
-                                    Ok(value) => handled |= value,
-                                    Err(error) => {
-                                        result = Err(error);
-                                        break;
-                                    }
-                                }
-                            }
-                            if result.is_ok() && !host.context.window.is_closed() {
-                                match host.dispatch_prevented(InputEvent::FilesDrop { x, y, paths })
-                                {
-                                    Ok(value) => handled |= value,
-                                    Err(error) => result = Err(error),
-                                }
-                            }
+                            // A `FileDrop` each, then `FilesDrop`, as
+                            // `zgx inspect files drop` drives it.
+                            let result = zgx::outside_drag::drop_files(x, y, paths, |event| {
+                                (!host.context.window.is_closed())
+                                    .then(|| host.dispatch_prevented(event))
+                            });
                             let _ = accepted.send(
-                                result.is_ok() && handled && !host.context.window.is_closed(),
+                                result.as_ref().is_ok_and(|handled| *handled)
+                                    && !host.context.window.is_closed(),
                             );
-                            result
+                            result.map(|_| ())
                         }
                     };
                     if let Err(error) = result {
@@ -9680,6 +9695,20 @@ const MENU_BAR_LATEST: std::time::Duration = std::time::Duration::from_secs(1);
 fn first_mark(once: &std::sync::Once, what: &str) {
     once.call_once(|| zgx::profile::mark(what));
 }
+/// The process's first present, marked (`zgx::profile::mark`) and, with
+/// `ZGX_SHADER_LOG=1`, written alone to stderr: what a probe times a start
+/// by, or waits on before reading the window's pixels (ZGX_PROFILE's spans
+/// would slow them). The GPU renderer's present and the raster window's
+/// (drawn and shown at once) alike.
+fn note_first_present() {
+    FIRST_PRESENT.call_once(|| {
+        let mark = first_present_mark();
+        zgx::profile::mark(&mark);
+        if zgx::env::var_os("ZGX_SHADER_LOG").is_some_and(|v| v != "0") {
+            eprintln!("zgx: {mark}");
+        }
+    });
+}
 /// The first present's mark, with what the shaders kept between launches
 /// did by then (Windows): a start that compiled them says so.
 fn first_present_mark() -> String {
@@ -9690,21 +9719,6 @@ fn first_present_mark() -> String {
         ),
         None => "first frame presented".into(),
     }
-}
-/// The pixels of a window's frame at `scale` that `rect` (in points) covers:
-/// `(x, y, width, height)`, less any part off its left or top edge (the
-/// frame's reader cuts the right and bottom).
-#[cfg(any(target_os = "macos", test))]
-fn snapshot_region(rect: zgx::scene::Rect, scale: f64) -> (u32, u32, u32, u32) {
-    let span = |from: f32, length: f32| {
-        let start = (f64::from(from) * scale).round();
-        let end = (f64::from(from + length) * scale).round();
-        let start = start.max(0.);
-        (start as u32, (end - start).max(0.) as u32)
-    };
-    let (x, width) = span(rect.x, rect.width);
-    let (y, height) = span(rect.y, rect.height);
-    (x, y, width, height)
 }
 
 /// The system's spring-loading delay (Accessibility > Pointer Control), or
@@ -10286,26 +10300,6 @@ mod tests {
         assert!(!acts(&touch(winit::event::TouchPhase::Moved)));
     }
 
-    #[test]
-    fn a_snapshot_reads_only_what_its_node_covers_on_the_window() {
-        let rect = |x, y, width, height| zgx::scene::Rect {
-            x,
-            y,
-            width,
-            height,
-        };
-        assert_eq!(
-            snapshot_region(rect(10., 5., 30., 20.), 2.),
-            (20, 10, 60, 40)
-        );
-        // Partly off the left and top: what is left of it, from the edge.
-        assert_eq!(
-            snapshot_region(rect(-100., -10., 300., 40.), 1.),
-            (0, 0, 200, 30)
-        );
-        // Wholly off: nothing.
-        assert_eq!(snapshot_region(rect(-50., 0., 40., 40.), 2.).2, 0);
-    }
     #[test]
     fn only_early_frames_at_a_fast_refresh_wait_for_the_others_point() {
         let ms = |value: f64| std::time::Duration::from_secs_f64(value / 1e3);

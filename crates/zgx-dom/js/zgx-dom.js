@@ -84,6 +84,12 @@ export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
   document.addEventListener("dragover", onOutsideOver, true);
   document.addEventListener("dragleave", onOutsideLeave, true);
   document.addEventListener("drop", onOutsideDrop, true);
+  // A contenteditable over a model (a text area with atoms): its edits are
+  // the model's.
+  document.addEventListener("beforeinput", onBeforeInput, true);
+  document.addEventListener("compositionstart", onCompositionStart, true);
+  document.addEventListener("compositionend", onCompositionEnd, true);
+  document.addEventListener("keydown", onEditKey, true);
 }
 
 // A link with no href (`role=link`): Enter presses it, as it does a link.
@@ -187,6 +193,7 @@ export function zgx_schedule() {
 }
 
 function onClick(event) {
+  if (offCount !== 0 && event.target.closest?.("[data-off]")) return;
   let node = event.target;
   while (node && node !== root) {
     const handler = node.$$c;
@@ -205,7 +212,80 @@ function onClick(event) {
   }
 }
 
+// Disabled elements (`OFF`) and what they hold, as a disabled fieldset's
+// controls are: no input or focus, heard disabled. Each control inside is
+// marked as the element is disabled (or as it is added, while it is),
+// keeping its own state in `$$off` to give back when no disabled element
+// holds it any more.
+let offCount = 0;
+const OFFABLE = "button,input,select,textarea,a[href],[tabindex],[contenteditable]";
+const NATIVE = /^(BUTTON|INPUT|SELECT|TEXTAREA)$/;
+
+function setOff(el, on) {
+  if (on === el.hasAttribute("data-off")) return;
+  if (on) {
+    offCount++;
+    el.setAttribute("data-off", "");
+    el.setAttribute("aria-disabled", "true");
+    for (const inside of el.querySelectorAll(OFFABLE)) offMark(inside);
+    el.$$offWatch = new MutationObserver((records) => {
+      for (const record of records)
+        for (const added of record.addedNodes) {
+          if (added.nodeType !== 1) continue;
+          if (added.matches(OFFABLE)) offMark(added);
+          for (const inside of added.querySelectorAll(OFFABLE)) offMark(inside);
+        }
+    });
+    el.$$offWatch.observe(el, { childList: true, subtree: true });
+  } else {
+    offCount--;
+    el.$$offWatch.disconnect();
+    el.$$offWatch = undefined;
+    el.removeAttribute("data-off");
+    // Still inside another disabled element: heard disabled through it.
+    if (el.$$off === undefined) el.removeAttribute("aria-disabled");
+    for (const inside of el.querySelectorAll(OFFABLE)) offRestore(inside);
+  }
+}
+
+function offMark(el) {
+  if (el.$$off !== undefined) return;
+  el.$$off = [el.disabled, el.getAttribute("tabindex"), el.getAttribute("aria-disabled"), el.getAttribute("contenteditable")];
+  if (NATIVE.test(el.tagName)) {
+    el.disabled = true;
+    return;
+  }
+  if (el.tagName === "A") el.setAttribute("tabindex", "-1");
+  else el.removeAttribute("tabindex");
+  if (el.hasAttribute("contenteditable")) el.setAttribute("contenteditable", "false");
+  el.setAttribute("aria-disabled", "true");
+}
+
+function offRestore(el) {
+  const was = el.$$off;
+  if (was === undefined || el.parentElement?.closest("[data-off]")) return;
+  el.$$off = undefined;
+  if (NATIVE.test(el.tagName)) {
+    el.disabled = was[0];
+    return;
+  }
+  const put = (name, value) => (value === null ? el.removeAttribute(name) : el.setAttribute(name, value));
+  put("tabindex", was[1]);
+  put("aria-disabled", el.hasAttribute("data-off") ? "true" : was[2]);
+  if (was[3] !== null) el.setAttribute("contenteditable", was[3]);
+}
+
 function onInput(event) {
+  // A contenteditable over a model the browser wrote into (`UNPREVENTED`),
+  // composing no more: shown again from the model.
+  const host = editHost(event.target);
+  if (host) {
+    if (host.$$dirty && host.$$cs === undefined) {
+      host.$$dirty = false;
+      sendEdit(host, "render", "", 0, 0);
+    }
+    return;
+  }
   const node = event.target;
   const handler = node.$$i;
   if (handler === undefined) return;
@@ -391,6 +471,7 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         else if (kind === 7) group(node, handler);
         else if (kind === 9) node.$$m = handler;
         else if (kind === 10) node.$$si = handler;
+        else if (kind === 11) node.$$e = handler;
         break;
       }
       case 15: { // VALUE id str: an editor's text, unless it holds it
@@ -423,7 +504,11 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
       case 18: { // PROP id name on: a boolean property
         const node = nodes[ops[i++]];
         const name = str();
-        node[name] = ops[i++] === 1;
+        const on = ops[i++] === 1;
+        // A control inside a disabled element stays disabled: its own
+        // value waits for the element to be enabled (`offRestore`).
+        if (node.$$off !== undefined && name === "disabled") node.$$off[0] = on;
+        else node[name] = on;
         break;
       }
       case 19: { // CLONE id from: a template's copy
@@ -520,6 +605,18 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
           panel.$$o.at = { x, y };
           if (panel.matches(":popover-open")) place(panel);
         }
+        break;
+      }
+      case 34: { // SELECT root anchor focus: a contenteditable's selection, in UTF-16 units
+        const el = nodes[ops[i++]];
+        const anchor = ops[i++];
+        const focus = ops[i++];
+        selectIn(el, anchor, focus);
+        break;
+      }
+      case 35: { // OFF id on: an element disabled, with what it holds
+        const el = nodes[ops[i++]];
+        setOff(el, ops[i++] === 1);
         break;
       }
       case 31: // PREVENT: the click being handled doesn't do its default
@@ -984,6 +1081,8 @@ function heard(event) {
 function run(node, event, phase) {
   const handler = node.$$e;
   if (handler === undefined) return;
+  // Inside a disabled element, as on the desktop: no input reaches it.
+  if (offCount !== 0 && event.target.closest?.("[data-off]")) return;
   const kind = EVENTS[event.type];
   const mods =
     (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0) | (event.metaKey ? 8 : 0);
@@ -1034,7 +1133,16 @@ function startDrag(node, handler, event) {
     ";position:fixed;margin:0;left:" + r.left + "px;top:" + r.top + "px;width:" + r.width + "px;height:" + r.height +
     "px;opacity:.8;pointer-events:none;z-index:2147483647;";
   document.body.appendChild(ghost);
-  drag = { source: node, handler, over: null, ghost, dx: event.clientX - r.left, dy: event.clientY - r.top };
+  drag = {
+    source: node,
+    handler,
+    over: null,
+    ghost,
+    dx: event.clientX - r.left,
+    dy: event.clientY - r.top,
+    x: event.clientX,
+    y: event.clientY,
+  };
   elementEvent(handler, 18 | (1 << 8), 1, r.left, r.top, 0, 0, undefined);
   document.addEventListener("pointermove", dragMove, true);
   document.addEventListener("pointerup", dragUp, true);
@@ -1057,6 +1165,7 @@ function dragOver(x, y) {
   if (drag.over && drag.over !== taken && drag.over.$$e !== undefined)
     elementEvent(drag.over.$$e, 14 | (1 << 8), 1, x, y, 0, 0, undefined);
   drag.over = taken;
+  return hit;
 }
 
 function dragMove(event) {
@@ -1065,7 +1174,9 @@ function dragMove(event) {
   drag.ghost.style.left = x - drag.dx + "px";
   drag.ghost.style.top = y - drag.dy + "px";
   elementEvent(drag.handler, 15 | (1 << 8), 1, x, y, 0, 0, undefined);
-  dragOver(x, y);
+  drag.x = x;
+  drag.y = y;
+  armDragScroll(dragOver(x, y));
   event.stopPropagation();
 }
 
@@ -1079,6 +1190,7 @@ function dragUp(event) {
     elementEvent(over.$$e, 14 | (1 << 8), 1, x, y, accepted, 0, undefined);
   }
   drag = null;
+  stopDragScroll();
   ghost.remove();
   document.removeEventListener("pointermove", dragMove, true);
   document.removeEventListener("pointerup", dragUp, true);
@@ -1091,6 +1203,84 @@ function dragUp(event) {
   };
   document.addEventListener("click", eat, { capture: true, once: true });
   setTimeout(() => document.removeEventListener("click", eat, { capture: true }), 0);
+}
+
+// A drag held near a scroll view's edge scrolls it, as the core's
+// (drag_scroll.rs): the innermost one under the pointer that can still move
+// toward that edge, up to 24 px a 16 ms frame within 48 px of it (full speed
+// from 12 in), per time, a stall making up for 50 ms at most; then what is
+// under the pointer hears the drag over it again. A frame is asked for only
+// while the pointer is in such a band: none in the middle, at the end of
+// what scrolls, or once the drag ends. (The browser scrolls for its own
+// drags, files and text from other apps.)
+const SCROLL_BAND = 48, SCROLL_FULL = 12, SCROLL_STEP = 24, SCROLL_FRAME = 16, SCROLL_STALL = 50;
+let dragScroll = null;
+
+function edgeSpeed(at, start, extent) {
+  if (!(at >= start && at <= start + extent)) return 0;
+  const ramp = (inside) => Math.min(Math.max((SCROLL_BAND - inside) / (SCROLL_BAND - SCROLL_FULL), 0), 1) * SCROLL_STEP;
+  const fromStart = at - start, fromEnd = start + extent - at;
+  if (fromEnd < SCROLL_BAND && fromEnd <= fromStart) return ramp(fromEnd);
+  if (fromStart < SCROLL_BAND) return -ramp(fromStart);
+  return 0;
+}
+
+// What the drag at x, y scrolls: { node, dx, dy } in px a frame, or null;
+// from `hit`, what is under it, if known (dragOver's).
+function dragScrollPlan(x, y, hit = document.elementFromPoint(x, y)) {
+  for (let n = hit; n && n.nodeType === 1; n = n.parentElement) {
+    const across = n.scrollWidth > n.clientWidth, down = n.scrollHeight > n.clientHeight;
+    if (!across && !down) continue;
+    const style = getComputedStyle(n);
+    const scrolls = (overflow) => overflow === "auto" || overflow === "scroll";
+    const r = n.getBoundingClientRect();
+    let dx = across && scrolls(style.overflowX) ? edgeSpeed(x, r.left + n.clientLeft, n.clientWidth) : 0;
+    let dy = down && scrolls(style.overflowY) ? edgeSpeed(y, r.top + n.clientTop, n.clientHeight) : 0;
+    if ((dx < 0 && n.scrollLeft <= 0) || (dx > 0 && n.scrollLeft >= n.scrollWidth - n.clientWidth - 0.5)) dx = 0;
+    if ((dy < 0 && n.scrollTop <= 0) || (dy > 0 && n.scrollTop >= n.scrollHeight - n.clientHeight - 0.5)) dy = 0;
+    if (dx || dy) return { node: n, dx, dy };
+  }
+  return null;
+}
+
+// Ask for a frame if the drag is in a band, and stop asking if it left one.
+function armDragScroll(hit) {
+  if (!drag || !dragScrollPlan(drag.x, drag.y, hit)) {
+    stopDragScroll();
+    return;
+  }
+  // Its first tick moves a frame's worth (rAF's time is its frame's start,
+  // before now).
+  if (!dragScroll) dragScroll = { frame: requestAnimationFrame(dragScrollTick), last: null };
+}
+
+function dragScrollTick(now) {
+  const last = dragScroll && dragScroll.last !== null ? dragScroll.last : now - SCROLL_FRAME;
+  dragScroll = null;
+  if (!drag) return;
+  const plan = dragScrollPlan(drag.x, drag.y);
+  if (!plan) return;
+  const frames = Math.min(Math.max(now - last, 0), SCROLL_STALL) / SCROLL_FRAME;
+  if (frames > 0) {
+    const { node } = plan, before = node.scrollLeft + "," + node.scrollTop;
+    node.scrollBy({ left: plan.dx * frames, top: plan.dy * frames, behavior: "instant" });
+    // It could not move (it scrolls along the other axis only): until the
+    // pointer moves.
+    if (node.scrollLeft + "," + node.scrollTop === before) return;
+    dragOver(drag.x, drag.y);
+  }
+  dragScroll = { frame: requestAnimationFrame(dragScrollTick), last: Math.max(now, last) };
+}
+
+function stopDragScroll() {
+  if (dragScroll) cancelAnimationFrame(dragScroll.frame);
+  dragScroll = null;
+}
+
+// Whether a frame is asked for a drag's autoscroll (for tests: none outside
+// a band).
+export function zgx_drag_scroll_pending() {
+  return dragScroll !== null;
 }
 
 // Text dragged in from another app or the desktop (the browser's own drag
@@ -1650,6 +1840,154 @@ const encoder = new TextEncoder();
 // A field whose value has a selection (text, search, a textarea…).
 function selects(el) {
   return (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.selectionStart !== null;
+}
+
+// A contenteditable over a model (`atom_editor.rs`): the element that takes
+// `target`'s edits, if it is in one.
+function editHost(target) {
+  let node = target;
+  while (node && node.$$e === undefined) node = node.parentNode;
+  return node || null;
+}
+
+// Where `node`'s `offset` is in `el`'s text, in UTF-16 units: its chips'
+// labels are its text.
+function textOffset(el, node, offset) {
+  const range = document.createRange();
+  range.setStart(el, 0);
+  range.setEnd(node, offset);
+  return range.toString().length;
+}
+
+// `el`'s selection in UTF-16 units of its text, in order.
+function editSelection(el) {
+  const selection = document.getSelection();
+  if (!selection || selection.rangeCount === 0 || !el.contains(selection.anchorNode)) {
+    const end = el.textContent.length;
+    return [end, end];
+  }
+  const range = selection.getRangeAt(0);
+  return [
+    textOffset(el, range.startContainer, range.startOffset),
+    textOffset(el, range.endContainer, range.endOffset),
+  ];
+}
+
+// A DOM point at `at` UTF-16 units into `el`'s text: never inside a chip
+// (contenteditable false), whose edges stand for it.
+function pointAt(el, at) {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let seen = 0;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const length = node.nodeValue.length;
+    const chip = node.parentNode !== el && node.parentNode.isContentEditable === false
+      ? node.parentNode
+      : null;
+    if (at <= seen + length) {
+      if (!chip) return [node, at - seen];
+      const index = Array.prototype.indexOf.call(chip.parentNode.childNodes, chip);
+      return at === seen ? [chip.parentNode, index] : [chip.parentNode, index + 1];
+    }
+    seen += length;
+  }
+  return [el, el.childNodes.length];
+}
+
+// `el`'s selection set from its model's (UTF-16 units), while it has the focus.
+function selectIn(el, anchor, focus) {
+  const active = document.activeElement;
+  if (active !== el && !el.contains(active)) return;
+  const selection = document.getSelection();
+  if (!selection) return;
+  const [anchorNode, anchorOffset] = pointAt(el, anchor);
+  const [focusNode, focusOffset] = pointAt(el, focus);
+  selection.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+}
+
+// An edit of `el` for its model: `kind` (an input type), `data`, over bytes
+// `start` to `end` of its text.
+function sendEdit(el, kind, data, start, end) {
+  // Both ends in one number, each below 2^26 (a text past 64 MiB keeps its
+  // ends there rather than mixing them).
+  const most = 67108863;
+  dispatch(el.$$e, 20, Math.min(start, most) * 67108864 + Math.min(end, most), kind + "\0" + data);
+}
+
+// Input types whose range is not at the caret: a spelling correction or a
+// text replacement, a drop, a drag's delete. Every other edit takes the
+// selection, and the model decides what a delete takes (a chip whole, its
+// own words and lines), as a native field does.
+const TARGETED = new Set(["insertReplacementText", "insertFromDrop", "deleteByDrag"]);
+
+// The edit's own range where it isn't the caret and the browser gives one,
+// else the selection: UTF-16 units of `el`'s text, in order.
+function editRange(el, event) {
+  const ranges = TARGETED.has(event.inputType) && event.getTargetRanges ? event.getTargetRanges() : [];
+  if (ranges.length) {
+    const range = ranges[0];
+    if (el.contains(range.startContainer) && el.contains(range.endContainer)) {
+      return [
+        textOffset(el, range.startContainer, range.startOffset),
+        textOffset(el, range.endContainer, range.endOffset),
+      ];
+    }
+  }
+  return editSelection(el);
+}
+
+// Input types the browser won't let be prevented: what it writes is the
+// model's at the composition's end, and the text is shown again whole
+// after it (`onInput`).
+const UNPREVENTED = new Set(["insertCompositionText", "deleteCompositionText", "insertFromComposition"]);
+
+function onBeforeInput(event) {
+  const el = editHost(event.target);
+  if (!el) return;
+  // An input method's text goes in as the browser shows it, its end to the
+  // model (`onCompositionEnd`).
+  if (UNPREVENTED.has(event.inputType) || event.isComposing) {
+    el.$$dirty = true;
+    return;
+  }
+  event.preventDefault();
+  const text = el.textContent;
+  const [start, end] = editRange(el, event);
+  let data = event.data;
+  // A paste or a drop: its plain text alone.
+  if (data == null && event.dataTransfer) data = event.dataTransfer.getData("text/plain");
+  sendEdit(el, event.inputType, data || "", utf8(text, start), utf8(text, end));
+}
+
+function onCompositionStart(event) {
+  const el = editHost(event.target);
+  if (!el) return;
+  const text = el.textContent;
+  const [start, end] = editSelection(el);
+  el.$$cs = [utf8(text, start), utf8(text, end)];
+  sendEdit(el, "compositionstart", "", el.$$cs[0], el.$$cs[1]);
+}
+
+function onCompositionEnd(event) {
+  const el = editHost(event.target);
+  if (!el) return;
+  const [start, end] = el.$$cs || [0, 0];
+  el.$$cs = undefined;
+  el.$$dirty = false;
+  sendEdit(el, "compositionend", event.data || "", start, end);
+}
+
+// Undo and redo by key in a contenteditable over a model: the model's, not
+// the browser's (which holds none of it).
+function onEditKey(event) {
+  const el = editHost(event.target);
+  if (!el || !(event.metaKey || event.ctrlKey) || event.altKey) return;
+  const key = event.key.toLowerCase();
+  const redo = (key === "z" && event.shiftKey) || (key === "y" && !event.shiftKey);
+  if (key !== "z" && !redo) return;
+  event.preventDefault();
+  const text = el.textContent;
+  const [start, end] = editSelection(el);
+  sendEdit(el, redo ? "historyRedo" : "historyUndo", "", utf8(text, start), utf8(text, end));
 }
 
 // UTF-16 offset `at` of `text` in UTF-8 bytes, as Rust counts it.

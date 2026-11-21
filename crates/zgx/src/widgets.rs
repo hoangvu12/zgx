@@ -400,6 +400,13 @@ struct EditorHint {
     lines: bool,
     /// A wheel over it stays with it at its edges (`View::overscroll_contain`).
     contain: Cell<bool>,
+    /// Text dragged over it leaves its caret and selection where they are
+    /// (`View::drop_caret(false)`): the app shows where it would drop.
+    no_drop_caret: Cell<bool>,
+    /// What it scrolls itself in, how far its text is scrolled and how far
+    /// it can be: a drag held near its edge scrolls it (`drag_scroll`), as a
+    /// scroll view's.
+    scrolled: Scrolled,
     /// A password field: its text shows masked and never leaves it.
     secure: Cell<bool>,
     /// What kind of text it takes (`View::input_mode`).
@@ -567,6 +574,55 @@ fn show_decorations(
     s.set_style(id, style);
     s.set_text_mark_shapes(id, shaped, ends, radius);
 }
+pub use crate::editor_atom_pointer::{AtomHover, AtomPress};
+#[doc(hidden)]
+pub use crate::editor_atom_style::{AtomIcon, AtomStyle, AtomSvg, AtomUnderline};
+/// What is told of an editor's atoms: what happened to them, then all of
+/// them as they are.
+pub type AtomListener = Box<dyn FnMut(&AtomEvent<'_>)>;
+/// What an editor tells of its atoms (`EditorHandle::on_atoms`).
+pub struct AtomEvent<'a> {
+    /// What happened to them, in order.
+    pub changes: &'a [crate::text_edit::AtomChange],
+    /// All of them as they are, by start.
+    pub atoms: &'a [crate::text_edit::Atom],
+    /// Why they changed: "edit", "undo", "redo" or "set".
+    pub reason: &'a str,
+    text: &'a str,
+}
+impl<'a> AtomEvent<'a> {
+    /// What happened to atoms over `text` (a text area's on another target,
+    /// the DOM's): `changes`, all of them as they are, and why.
+    #[doc(hidden)]
+    pub fn new(
+        changes: &'a [crate::text_edit::AtomChange],
+        atoms: &'a [crate::text_edit::Atom],
+        reason: &'a str,
+        text: &'a str,
+    ) -> Self {
+        Self {
+            changes,
+            atoms,
+            reason,
+            text,
+        }
+    }
+    /// Byte offset `byte` of the text as it is now, in characters.
+    pub fn chars(&self, byte: usize) -> usize {
+        let mut at = byte.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        self.text[..at].chars().count()
+    }
+    /// The character offset `chars` as a byte of the text as it is now.
+    pub fn byte(&self, chars: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(chars)
+            .map_or(self.text.len(), |(at, _)| at)
+    }
+}
 #[derive(Default)]
 struct CodeHint {
     /// Ranges of the text marked with a colour behind them (a search's
@@ -602,12 +658,51 @@ struct CodeHint {
     /// Where it was last drawn, and last told.
     caret_drawn: Cell<Option<Caret>>,
     caret_told: Cell<Option<Caret>>,
+    /// What its atoms need (`CodeAtoms`): made as the first is set or listened to; most text areas never do.
+    atoms: std::cell::OnceCell<Box<CodeAtoms>>,
     /// Told the first line in view when it changes
     /// (`EditorHandle::on_top_line`), as `on_caret`.
     on_top_line: RefCell<Option<TopLineListener>>,
     top_line_listened: Cell<bool>,
     top_line_drawn: Cell<Option<usize>>,
     top_line_told: Cell<Option<usize>>,
+    /// Its spans' edges the caret tells apart (`EditorHandle::
+    /// set_caret_edges`), made when the app first sets them; most text
+    /// areas never do.
+    edge: std::cell::OnceCell<Box<crate::editor_edge::EdgeHint>>,
+    /// Its gap cursor (`EditorHandle::set_gaps`), made when the app first
+    /// sets or listens to one; most text areas never do.
+    gap: std::cell::OnceCell<Box<crate::editor_gap::GapHint>>,
+}
+/// What a text area's atoms need (`CodeHint::atoms`).
+#[derive(Default)]
+struct CodeAtoms {
+    /// The wash behind atoms (`EditorHandle::set_atom_wash`) that have none of
+    /// their own.
+    atom_wash: Cell<Option<Color>>,
+    /// Told when its atoms are made, lost or moved (`EditorHandle::on_atoms`),
+    /// as `on_caret`, and the revision of them it last told.
+    on_atoms: RefCell<Option<AtomListener>>,
+    atoms_told: Cell<u64>,
+    /// Called after each draw (`EditorHandle::on_drawn`): what follows its
+    /// atoms under the pointer as a scroll or a new layout moves them.
+    on_drawn: RefCell<Option<Box<dyn FnMut()>>>,
+    /// How its atoms show (`EditorHandle::set_atom_style`), and the atoms'
+    /// and text's revisions the line cache's atom spans are of.
+    atom_style: RefCell<Option<std::sync::Arc<crate::editor_atom_style::AtomStyle>>>,
+    atom_spans_of: Cell<Option<(u64, u64)>>,
+    /// Its atoms' icons, shown: each node and what it shows.
+    atom_icons: RefCell<Vec<(NodeId, std::sync::Arc<crate::svg::SvgData>)>>,
+}
+impl CodeHint {
+    /// What its atoms need, if any has been set.
+    fn atoms(&self) -> Option<&CodeAtoms> {
+        self.atoms.get().map(|atoms| &**atoms)
+    }
+    /// What its atoms need, made the first time.
+    fn atoms_made(&self) -> &CodeAtoms {
+        self.atoms.get_or_init(Box::default)
+    }
 }
 impl Drop for CodeHint {
     /// A long text's last layout and its line cache hold each other.
@@ -617,15 +712,32 @@ impl Drop for CodeHint {
         }
     }
 }
+/// An editor's viewport, how far its text is scrolled in it, across and
+/// down, and how far it can be.
+struct Scrolled {
+    viewport: NodeId,
+    offset: Rc<RefCell<(f32, f32)>>,
+    limit: Rc<Cell<(f32, f32)>>,
+}
+/// A text area that scrolls itself, as `drag_scroll` reads it.
+pub(crate) struct EditorScroll {
+    pub(crate) viewport: NodeId,
+    pub(crate) offset: (f32, f32),
+    pub(crate) limit: (f32, f32),
+    /// It scrolls across: it doesn't wrap.
+    pub(crate) across: bool,
+}
 impl EditorHint {
-    fn new(value: EditorValue, lines: bool) -> Self {
+    fn new(value: EditorValue, lines: bool, scrolled: Scrolled) -> Self {
         Self {
             value,
+            scrolled,
             placeholder: RefCell::default(),
             caret: Cell::default(),
             select_on_focus: Cell::default(),
             lines,
             contain: Cell::default(),
+            no_drop_caret: Cell::default(),
             secure: Cell::default(),
             input_mode: Cell::default(),
             misspelled: RefCell::default(),
@@ -706,6 +818,17 @@ impl EditorHint {
     fn code_made(&self) -> &CodeHint {
         self.code.get_or_init(Default::default)
     }
+    /// Its edges' state, if the app ever set them.
+    fn edge(&self) -> Option<&crate::editor_edge::EdgeHint> {
+        self.code()?.edge.get().map(|edge| &**edge)
+    }
+    /// Its gap cursor's state, if the app ever set one.
+    fn gap(&self) -> Option<&crate::editor_gap::GapHint> {
+        self.code()?.gap.get().map(|gap| &**gap)
+    }
+    fn gap_made(&self) -> &crate::editor_gap::GapHint {
+        self.code_made().gap.get_or_init(Default::default)
+    }
     /// Its long text's line cache, made the first time it is needed.
     fn line_cache(&self) -> Rc<crate::editor_lines::LineCache> {
         self.code_made()
@@ -736,6 +859,146 @@ impl EditorHint {
             .and_then(|code| code.lines.borrow().clone())
             .is_some_and(|lines| lines.highlighted())
     }
+}
+/// `hit`, where a pointer at `x` lands, out of any atom it falls inside to
+/// the edge nearer `x` on screen: a press on a picture's right half lands
+/// after it, whatever its text (the bytes inside an atom have no place).
+fn hit_out_of_atoms(
+    edit: &TextEditor,
+    layout: &dyn TextLayout,
+    hit: TextPosition,
+    x: f32,
+) -> TextPosition {
+    let at = hit.byte_offset;
+    let Some(atom) = edit
+        .atoms()
+        .iter()
+        .find(|atom| atom.range.start < at && at < atom.range.end)
+    else {
+        return hit;
+    };
+    let edge = |byte_offset| {
+        layout
+            .caret_position(TextPosition {
+                byte_offset,
+                affinity: TextAffinity::After,
+            })
+            .x
+    };
+    let after = (x - edge(atom.range.end)).abs() < (x - edge(atom.range.start)).abs();
+    TextPosition {
+        byte_offset: if after {
+            atom.range.end
+        } else {
+            atom.range.start
+        },
+        affinity: TextAffinity::After,
+    }
+}
+/// `plain` decorations with `e`'s atoms' washes among them, by start (the
+/// text area's `wash` for those with none of their own).
+#[cold]
+#[inline(never)]
+fn washed_atoms<'a>(
+    e: &TextEditor,
+    wash: Option<Color>,
+    plain: &'a [(std::ops::Range<usize>, Color)],
+) -> std::borrow::Cow<'a, [(std::ops::Range<usize>, Color)]> {
+    let mut marked: Vec<(std::ops::Range<usize>, Color)> = e
+        .atoms()
+        .iter()
+        .filter_map(|atom| atom.wash.or(wash).map(|color| (atom.range.clone(), color)))
+        .collect();
+    if marked.is_empty() {
+        return std::borrow::Cow::Borrowed(plain);
+    }
+    marked.extend(plain.iter().cloned());
+    marked.sort_by_key(|(range, _)| range.start);
+    std::borrow::Cow::Owned(marked)
+}
+/// After a text area's draw: what happened to its atoms told to its
+/// `on_atoms` (or let go, with none to tell), then its `on_drawn`. Asked
+/// only of one that has either, or changes waiting.
+#[cold]
+#[inline(never)]
+fn tell_atoms(code: &CodeHint, editor: &Rc<RefCell<TextEditor>>) {
+    let code = code.atoms_made();
+    for _ in 0..4 {
+        let revision = editor.borrow().atoms_revision();
+        let listening = code.on_atoms.borrow().is_some();
+        if !listening {
+            // Nothing to tell: what happened is not kept.
+            editor.borrow_mut().take_atom_changes();
+            break;
+        }
+        let idle = !editor.borrow().atom_changes_pending();
+        if revision == code.atoms_told.get() && idle {
+            break;
+        }
+        let Some(mut callback) = code.on_atoms.borrow_mut().take() else {
+            break;
+        };
+        let (changes, atoms, reason, text) = {
+            let mut e = editor.borrow_mut();
+            (
+                e.take_atom_changes(),
+                e.atoms().to_vec(),
+                e.atom_reason(),
+                e.text().into_owned(),
+            )
+        };
+        code.atoms_told.set(revision);
+        callback(&AtomEvent {
+            changes: &changes,
+            atoms: &atoms,
+            reason,
+            text: &text,
+        });
+        let mut slot = code.on_atoms.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(callback);
+        }
+    }
+    // Taken while it runs: one it draws again skips it.
+    let drawn = code.on_drawn.borrow_mut().take();
+    if let Some(mut drawn) = drawn {
+        drawn();
+        let mut slot = code.on_drawn.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(drawn);
+        }
+    }
+}
+/// The line cache's atom spans (`AtomStyle`), made again when its atoms,
+/// its text or their style changed; none while no atom is styled.
+#[inline(never)]
+fn follow_atom_styles(code: &CodeHint, hint: &EditorHint, e: &TextEditor) {
+    let code = code.atoms_made();
+    let style = code.atom_style.borrow().clone();
+    let atoms = e.atoms();
+    if style.is_none() && !atoms.iter().any(|atom| atom.style.is_some()) {
+        if code.atom_spans_of.replace(None).is_some() {
+            hint.line_cache().set_atom_spans(None);
+        }
+        return;
+    }
+    let key = (e.atoms_revision(), e.revision());
+    if code.atom_spans_of.get() == Some(key) {
+        return;
+    }
+    code.atom_spans_of.set(Some(key));
+    let base = style.as_deref().cloned().unwrap_or_default();
+    let text = e.text();
+    let mut spans = Vec::new();
+    let lines = hint.line_cache();
+    let mut name = |look| lines.look(look);
+    for atom in atoms {
+        base.under(atom.style.as_deref())
+            .spans(&text, atom.range.clone(), &mut spans, &mut name);
+    }
+    spans.sort_by_key(|(range, _)| range.start);
+    hint.line_cache()
+        .set_atom_spans((!spans.is_empty()).then_some(spans));
 }
 /// An editor's blur (`build_text_input_inner`): none, its window going to
 /// the back, or a context menu taking its focus (`context_menu_holds`).
@@ -779,7 +1042,135 @@ pub struct Caret {
     /// Where the caret is.
     pub focus: usize,
 }
+/// The span whose edges the caret tells apart at an offset
+/// (`EditorHandle::set_caret_edges`).
+#[doc(hidden)]
+pub type CaretEdges = Rc<dyn Fn(usize) -> Option<std::ops::Range<usize>>>;
+/// Which side of a span's edge the caret is at (`EditorHandle::
+/// set_caret_edges`): one offset, inside the span or outside it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaretSide {
+    /// Outside the span: what is typed is not of it.
+    #[default]
+    Outside,
+    /// Just inside it.
+    Inside,
+}
+/// How the caret comes to a gap (`EditorHandle::set_gaps`): by which arrow,
+/// or a press on its boundary.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GapDir {
+    /// ← at the start of the line after it.
+    Left,
+    /// → at the end of the line before it.
+    Right,
+    /// ↑ from the first row of the line after it.
+    Up,
+    /// ↓ from the last row of the line before it.
+    Down,
+    /// A press within a few points of its boundary: no direction, the app
+    /// decides (true for every `GapDir` keeps a press going in wherever an
+    /// arrow may).
+    Press,
+}
+/// What was typed with the caret at a gap (`EditorHandle::on_gap_input`):
+/// nothing of it went into the text, for the app to add a paragraph there.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GapInput {
+    /// Text typed (or committed by an input method).
+    Text(String),
+    /// Return.
+    Enter,
+    /// Backspace (`backward`) or forward Delete.
+    Delete {
+        /// Backspace.
+        backward: bool,
+    },
+    /// Text pasted.
+    Paste(String),
+}
 impl EditorHandle {
+    /// The spans whose edges the caret tells apart (a note's inline code):
+    /// `edges(offset)` gives the span the offset is in or at an end of. At
+    /// such an edge the caret is inside the span or outside it
+    /// (`caret_side`); the first ← or → there moves to the other side
+    /// without moving over a character, and the caret shows a hair inside
+    /// or outside the edge. An arrow reaching an edge from within the span
+    /// is inside; an edit, a press or `set_selection` puts it outside.
+    /// `None`: no such spans.
+    #[doc(hidden)]
+    pub fn set_caret_edges(&self, edges: Option<CaretEdges>) {
+        let edge = self.hint.code_made().edge.get_or_init(Default::default);
+        *edge.edges.borrow_mut() = edges;
+        edge.side.set(CaretSide::Outside);
+        self.refresh();
+    }
+    /// Which side of an edge the caret is at (`Outside` away from any).
+    #[doc(hidden)]
+    pub fn caret_side(&self) -> CaretSide {
+        self.hint
+            .edge()
+            .map_or(CaretSide::Outside, |edge| edge.side.get())
+    }
+    /// Put the caret on `side` of the edge it is at (after `set_selection`,
+    /// which puts it outside).
+    #[doc(hidden)]
+    pub fn set_caret_side(&self, side: CaretSide) {
+        if let Some(edge) = self.hint.edge() {
+            edge.side.set(side);
+            self.refresh();
+        }
+    }
+    /// Where the caret may sit between lines rather than in one (a gap
+    /// cursor): `gaps(n, dir)` says whether before line `n` (`n` the line
+    /// count: after the last) is such a place for the caret coming as `dir`
+    /// says (so ← and → may go into a gap beside an atom block that ↑ and ↓
+    /// pass, selecting the atom as the web does), where no text is to put a caret in
+    /// (between two tables, an image and a rule, before a table at the
+    /// start). The arrows go into such a boundary from the line beside it,
+    /// as does a press on it; there the caret shows as a short bar along it,
+    /// and what is typed goes to `on_gap_input`, not into the text. `None`:
+    /// none (the caret leaves the one it is in).
+    #[doc(hidden)]
+    pub fn set_gaps(&self, gaps: Option<Rc<dyn Fn(usize, GapDir) -> bool>>) {
+        let gap = self.hint.gap_made();
+        let none = gaps.is_none();
+        *gap.gaps.borrow_mut() = gaps;
+        if none {
+            gap.go(None);
+        }
+        self.refresh();
+    }
+    /// Put the caret at the gap before line `at` (`None`: back in the text,
+    /// where its selection is), whether or not `set_gaps` allows it there.
+    #[doc(hidden)]
+    pub fn set_gap(&self, at: Option<usize>) {
+        self.hint.gap_made().go(at);
+        self.refresh();
+    }
+    /// The gap the caret is at, if it is at one.
+    #[doc(hidden)]
+    pub fn gap(&self) -> Option<usize> {
+        self.hint.gap().and_then(|gap| gap.at.get())
+    }
+    /// Call `told` when the caret goes into a gap (`Some(line)`: before
+    /// that line) or out of one (`None`), by the arrows, a press or the app.
+    #[doc(hidden)]
+    pub fn on_gap(&self, told: impl FnMut(Option<usize>) + 'static) {
+        *self.hint.gap_made().on_gap.borrow_mut() = Some(Box::new(told));
+    }
+    /// Call `told` with what is typed while the caret is at a gap (the gap's
+    /// line, and what), which doesn't go into the text: the app adds a
+    /// paragraph there and puts the caret in it (`set_gap(None)`,
+    /// `set_selection`).
+    #[doc(hidden)]
+    pub fn on_gap_input(&self, told: impl FnMut(usize, GapInput) + 'static) {
+        *self.hint.gap_made().on_input.borrow_mut() = Some(Box::new(told));
+    }
     /// Exact natural metrics at a finite, positive content width. A reactive
     /// reader follows content, IME and typography changes after layout settles.
     /// Passwords and unmounted editors return `None`.
@@ -997,6 +1388,12 @@ impl EditorHandle {
     /// `set_selection`, the caret scrolled into view (`reveal`) or left
     /// where it is (`Ui::restore_focus`).
     fn select(&self, anchor: usize, focus: usize, reveal: bool) {
+        if let Some(edge) = self.hint.edge() {
+            edge.side.set(CaretSide::Outside);
+        }
+        if let Some(gap) = self.hint.gap() {
+            gap.go(None);
+        }
         let focus = {
             let mut editor = self.editor.borrow_mut();
             editor.set_selection(anchor, focus);
@@ -1025,15 +1422,19 @@ impl EditorHandle {
         *self.hint.misspelled.borrow_mut() = ranges;
         self.refresh();
     }
-    /// The misspelled word the selection is in (or the caret touches).
+    /// The misspelled word the selection is in (or the caret touches), not
+    /// one in an atom (which is not marked).
     pub(crate) fn misspelling_at_selection(&self) -> Option<std::ops::Range<usize>> {
         let (anchor, focus) = self.selection();
         let (start, end) = (anchor.min(focus), anchor.max(focus));
+        let editor = self.editor.borrow();
         self.hint
             .misspelled
             .borrow()
             .iter()
-            .find(|range| range.start <= start && end <= range.end)
+            .find(|range| {
+                range.start <= start && end <= range.end && !in_an_atom(editor.atoms(), range)
+            })
             .cloned()
     }
     pub(crate) fn misspellings(&self) -> Vec<std::ops::Range<usize>> {
@@ -1102,11 +1503,30 @@ impl EditorHandle {
     pub fn is_read_only(&self) -> bool {
         self.read_only.get()
     }
+    /// How far its text is scrolled within it, across and down, as the
+    /// next draw shows it.
+    #[doc(hidden)]
+    pub fn scroll_offset(&self) -> (f32, f32) {
+        *self.hint.scrolled.offset.borrow()
+    }
     /// Keep a wheel gesture that starts over it at its edges, as CSS's
     /// `overscroll-behavior: contain`: the scroll views around it don't
     /// take what it can't scroll (`View::overscroll_contain`).
     pub fn set_overscroll_contain(&self, contain: bool) {
         self.hint.contain.set(contain);
+    }
+    /// Whether text dragged over it moves its caret to where it would drop
+    /// (on until set). Off, the drag is still taken and drops where it is
+    /// let go, its caret and selection staying where they were meanwhile:
+    /// the app shows where it would drop. (Pin line.)
+    #[doc(hidden)]
+    pub fn set_drop_caret(&self, shows: bool) {
+        self.hint.no_drop_caret.set(!shows);
+    }
+    /// `set_drop_caret`'s. (Pin line.)
+    #[doc(hidden)]
+    pub fn shows_drop_caret(&self) -> bool {
+        !self.hint.no_drop_caret.get()
     }
     /// Change editing policy without moving focus or changing committed text/history.
     /// Entering read-only mode cancels an existing composition.
@@ -1209,6 +1629,128 @@ impl EditorHandle {
         *code.on_caret.borrow_mut() = Some(Box::new(told));
         code.caret_listened.set(true);
         code.caret_told.set(None);
+        self.refresh();
+    }
+    /// Its atoms (`TextEditor::atoms`), by start.
+    pub fn atoms(&self) -> Vec<crate::text_edit::Atom> {
+        self.editor.borrow().atoms().to_vec()
+    }
+    /// Make `label` an atom at the caret (over the selection), or over
+    /// `range` where given (the trigger text typed for it): one undo step,
+    /// the caret after it. Its id. None for a read-only editor or a range
+    /// that isn't text.
+    pub fn insert_atom(
+        &self,
+        label: &str,
+        range: Option<std::ops::Range<usize>>,
+        wash: Option<Color>,
+        payload: Option<std::sync::Arc<dyn crate::text_edit::AtomPayload>>,
+    ) -> Option<u64> {
+        if self.is_read_only() {
+            return None;
+        }
+        self.preferred_x.set(None);
+        let id = self
+            .editor
+            .borrow_mut()
+            .insert_atom(label, range, wash, payload)?;
+        self.hint.code_made();
+        self.hint.value.write(&self.editor);
+        self.refresh();
+        Some(id)
+    }
+    /// Set its atoms (a draft's): see `TextEditor::set_atoms`.
+    pub fn set_atoms(&self, atoms: Vec<crate::text_edit::Atom>) {
+        self.hint.code_made();
+        // Unchanged, nothing draws: a binding that follows a list calls this
+        // from an effect, and drawing there would follow what it reads.
+        if self.editor.borrow_mut().set_atoms(atoms) {
+            self.refresh();
+        }
+    }
+    /// The name `svg` at `extents` (`[width, height, descent]` in EM) has as
+    /// a picture in its text (`SpanStyle::inline_svg`, set by a highlighter):
+    /// over U+FFFC characters each one its box, over other text the span one
+    /// box. The same picture at the same size has the same name.
+    #[doc(hidden)]
+    pub fn inline_svg(
+        &self,
+        svg: std::sync::Arc<crate::svg::SvgData>,
+        extents: [f32; 3],
+    ) -> std::num::NonZeroU32 {
+        self.hint.line_cache().picture(svg, extents)
+    }
+    /// How its atoms show beyond a wash (a mention's colour, weight,
+    /// underline and leading icon), under each atom's own `Atom::style`.
+    #[doc(hidden)]
+    pub fn set_atom_style(&self, style: Option<crate::editor_atom_style::AtomStyle>) {
+        let code = self.hint.code_made().atoms_made();
+        *code.atom_style.borrow_mut() = style.filter(|s| !s.is_empty()).map(std::sync::Arc::new);
+        code.atom_spans_of.set(None);
+        self.refresh();
+    }
+    /// The wash behind atoms that have none of their own (`Atom::wash`).
+    pub fn set_atom_wash(&self, color: Option<Color>) {
+        self.hint.code_made().atoms_made().atom_wash.set(color);
+        self.refresh();
+    }
+    /// A new atom's id, for one made by `set_atoms`.
+    pub fn new_atom_id(&self) -> u64 {
+        self.editor.borrow_mut().new_atom_id()
+    }
+    /// The box of each line bytes `range` of its text run on, in the
+    /// window's points, in order: an atom wrapped across lines has one on
+    /// each. Shapes the text: for a pointer over it, not every frame.
+    pub fn range_boxes(&self, range: std::ops::Range<usize>) -> Vec<Rect> {
+        let scene = self.scene.borrow();
+        let Some(lines) = self.hint.shown_lines() else {
+            return scene.text_range_rects(self.text, range);
+        };
+        // Shown a line at a time: each line it runs on gives its piece.
+        let (start, end) = (range.start, range.end.max(range.start));
+        let mut boxes = Vec::new();
+        for (line, node) in lines {
+            if !(line.start < end && start < line.end) {
+                continue;
+            }
+            let local = start.max(line.start) - line.start..end.min(line.end) - line.start;
+            boxes.extend(scene.text_range_rects(node, local));
+        }
+        boxes
+    }
+    /// The atom drawn under `x`, `y` (the window's points), and its box on
+    /// the line there: none between atoms, or past a line's end beside one.
+    pub fn atom_at(&self, x: f32, y: f32) -> Option<(crate::text_edit::Atom, Rect)> {
+        let at = self.offset_at(x, y)?;
+        let atoms = self.atoms();
+        // The byte a point lands on is a caret's place: an atom it starts,
+        // ends or lies inside.
+        atoms
+            .into_iter()
+            .filter(|atom| atom.range.start <= at && at <= atom.range.end)
+            .find_map(|atom| {
+                let hit = self
+                    .range_boxes(atom.range.clone())
+                    .into_iter()
+                    .find(|piece| {
+                        (piece.x..=piece.x + piece.width).contains(&x)
+                            && (piece.y..=piece.y + piece.height).contains(&y)
+                    })?;
+                Some((atom, hit))
+            })
+    }
+    /// Call `drawn` after each time it is drawn: a scroll, a new layout or
+    /// an edit (what is under the pointer may have moved).
+    pub fn on_drawn(&self, drawn: impl FnMut() + 'static) {
+        *self.hint.code_made().atoms_made().on_drawn.borrow_mut() = Some(Box::new(drawn));
+    }
+    /// Call `told` with what happened to its atoms, and all of them as they
+    /// are, whenever they are made, lost or moved (an edit, an undo): after
+    /// the editor is drawn, so it may change what it likes.
+    pub fn on_atoms(&self, told: impl FnMut(&AtomEvent<'_>) + 'static) {
+        let code = self.hint.code_made().atoms_made();
+        *code.on_atoms.borrow_mut() = Some(Box::new(told));
+        code.atoms_told.set(self.editor.borrow().atoms_revision());
         self.refresh();
     }
     /// Call `told` with the first line in view, from 1, whenever it changes
@@ -1456,6 +1998,15 @@ impl EditorHandle {
         if self.is_read_only() {
             return;
         }
+        if let Some(gap) = self.hint.gap()
+            && let Some(at) = gap.at.get()
+        {
+            gap.input(
+                at,
+                GapInput::Paste(normalize_text(text, self.multiline).into_owned()),
+            );
+            return;
+        }
         self.preferred_x.set(None);
         // A step of its own, even of one character: not the typing's.
         self.editor
@@ -1502,6 +2053,20 @@ pub struct CopyRequest<'a> {
     pub range: std::ops::Range<usize>,
     /// What is selected.
     pub text: &'a str,
+}
+/// An Edit menu item that works on what has focus or is selected
+/// (`Ui::edit_command`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditCommand {
+    /// Copy the selection.
+    Copy,
+    /// Copy the selection, then delete it.
+    Cut,
+    /// Paste the clipboard's text in place of the selection.
+    Paste,
+    /// Select all the text there is to select.
+    SelectAll,
 }
 /// What goes on the clipboard: text, and HTML beside it where given.
 /// (Pin line.)
@@ -1681,6 +2246,184 @@ fn long_layout(
         scene.text_shaper_revision(),
         || (scene.line_shaper(size, font), scene.rich_line_shaper()),
     )
+}
+/// Where the boundary before line `n` of `text` lies in `layout`: the top
+/// of that line, or the bottom of the last for `n` past it.
+fn gap_boundary_y(layout: &dyn TextLayout, text: &str, n: usize) -> f32 {
+    match crate::editor_gap::line_start(text, n) {
+        Some(start) => {
+            layout
+                .caret_position(TextPosition {
+                    byte_offset: start,
+                    affinity: TextAffinity::After,
+                })
+                .y
+        }
+        None => {
+            let end = layout.caret_position(TextPosition {
+                byte_offset: text.len(),
+                affinity: TextAffinity::Before,
+            });
+            end.y + end.height
+        }
+    }
+}
+/// What a text area's gap cursor does with `event` (`EditorHandle::set_gaps`):
+/// the caret at a gap takes the arrows out of it and what is typed (to the
+/// app); the arrows or a press beside a boundary the app allows take it in.
+/// True if the event was its. `layout` lays the text out; `point` turns a
+/// press's point into the text's.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn gap_event(
+    gap: &crate::editor_gap::GapHint,
+    event: &InputEvent,
+    editor: &RefCell<TextEditor>,
+    position: &Cell<TextPosition>,
+    layout: &dyn Fn(&TextEditor) -> Rc<dyn TextLayout>,
+    point: &dyn Fn(f32, f32) -> (f32, f32),
+    single_press: bool,
+) -> bool {
+    use crate::editor_gap::{line_end, line_of, line_start};
+    let at = gap.at.get();
+    match event {
+        InputEvent::KeyDown { key, modifiers, .. } => {
+            let arrow = matches!(
+                key,
+                Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown
+            );
+            let back = matches!(key, Key::ArrowLeft | Key::ArrowUp);
+            if let Some(n) = at {
+                match key {
+                    // Out, to the text beside it; at the text's very start or
+                    // end it stays.
+                    _ if arrow => {
+                        let to = {
+                            let e = editor.borrow();
+                            let text = e.text();
+                            match back {
+                                true => n.checked_sub(1).and_then(|m| line_end(&text, m)),
+                                false => line_start(&text, n),
+                            }
+                        };
+                        if let Some(to) = to {
+                            let focus = {
+                                let mut e = editor.borrow_mut();
+                                e.set_selection(to, to);
+                                e.selection().focus
+                            };
+                            position.set(TextPosition {
+                                byte_offset: focus,
+                                affinity: TextAffinity::After,
+                            });
+                            gap.go(None);
+                        }
+                    }
+                    Key::Enter => gap.input(n, GapInput::Enter),
+                    Key::Backspace => gap.input(n, GapInput::Delete { backward: true }),
+                    Key::Delete => gap.input(n, GapInput::Delete { backward: false }),
+                    // Moving by more leaves the gap, from the caret it had.
+                    Key::Home | Key::End | Key::PageUp | Key::PageDown => {
+                        gap.go(None);
+                        return false;
+                    }
+                    _ => return false,
+                }
+                return true;
+            }
+            if !arrow || modifiers.shift || modifiers.meta || modifiers.control || modifiers.alt {
+                return false;
+            }
+            // In, from the edge of the line beside the boundary.
+            let target = {
+                let e = editor.borrow();
+                let selection = e.selection();
+                if !selection.range().is_empty() {
+                    return false;
+                }
+                let (text, focus) = (e.text(), selection.focus);
+                let line = line_of(&text, focus);
+                let (Some(start), Some(end)) = (line_start(&text, line), line_end(&text, line))
+                else {
+                    return false;
+                };
+                match key {
+                    Key::ArrowLeft => (focus == start).then_some((line, GapDir::Left)),
+                    Key::ArrowRight => (focus == end).then_some((line + 1, GapDir::Right)),
+                    _ => {
+                        // Up from its first row, down from its last.
+                        let layout = layout(&e);
+                        let shown = position.get();
+                        let current = match shown.byte_offset == focus {
+                            true => shown,
+                            false => TextPosition {
+                                byte_offset: focus,
+                                affinity: TextAffinity::After,
+                            },
+                        };
+                        let edge = TextPosition {
+                            byte_offset: if back { start } else { end },
+                            affinity: if back {
+                                TextAffinity::After
+                            } else {
+                                TextAffinity::Before
+                            },
+                        };
+                        let row = |p| layout.caret_position(p).y;
+                        ((row(current) - row(edge)).abs() < 0.5).then_some(if back {
+                            (line, GapDir::Up)
+                        } else {
+                            (line + 1, GapDir::Down)
+                        })
+                    }
+                }
+            };
+            match target {
+                Some((n, dir)) if gap.allows(n, dir) => {
+                    gap.go(Some(n));
+                    true
+                }
+                _ => false,
+            }
+        }
+        InputEvent::Text(text) | InputEvent::ImeCommit(text) => match at {
+            Some(n) => {
+                gap.input(n, GapInput::Text(text.clone()));
+                true
+            }
+            None => false,
+        },
+        InputEvent::PointerDown {
+            x,
+            y,
+            button: PointerButton::Primary,
+        } => {
+            // A press on a boundary the app allows (a line's top or bottom,
+            // within a few points): the caret goes into its gap.
+            let pressed = single_press.then(|| {
+                let (x, y) = point(*x, *y);
+                let e = editor.borrow();
+                let layout = layout(&e);
+                let text = e.text();
+                let line = line_of(&text, layout.hit_position(x, y).byte_offset);
+                [line, line + 1].into_iter().find(|&n| {
+                    (y - gap_boundary_y(&*layout, &text, n)).abs() <= crate::editor_gap::PRESS_SLOP
+                })
+            });
+            match pressed.flatten() {
+                Some(n) if gap.allows(n, GapDir::Press) => {
+                    gap.go(Some(n));
+                    true
+                }
+                _ => {
+                    gap.go(None);
+                    false
+                }
+            }
+        }
+        _ => false,
+    }
 }
 /// `e`'s committed text laid out (`editor_layout`): a long one by its
 /// lines, from the chunks it shares, known by its revision (a pointer's
@@ -1974,6 +2717,11 @@ pub(crate) struct UiStorage {
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
     observed_bounds: RefCell<crate::scene::NodeMap<Observed<Rect, crate::scene::ScrollAnchor>>>,
     observed_visibility: RefCell<crate::scene::NodeMap<Observed<bool, crate::scene::ShownAnchor>>>,
+    /// Of those, the ones observed since the frame last told them: a
+    /// preparation ahead of the frame's (spare time building rows) tells
+    /// these alone (`prepare_frame_once`), so a row built ahead knows
+    /// whether it is near the view by the frame that shows it.
+    fresh_visibility: RefCell<Vec<NodeId>>,
     /// Of those, the ones that count as shown within a margin of the view
     /// (`observe_visibility_within`): only nodes asked so are here.
     visibility_margins: RefCell<crate::scene::NodeMap<f32>>,
@@ -2023,6 +2771,8 @@ pub(crate) struct UiStorage {
     paging: RefCell<crate::paging::State>,
     /// Scroll views easing to where `NodeHandle::scroll_into_view` asked.
     scroll_reveals: RefCell<crate::scroll_reveal::State>,
+    /// A scroll view a drag holds near its edge scrolling.
+    drag_scroll: RefCell<crate::drag_scroll::State>,
     /// Scrollbars hide until their view scrolls (`Ui::set_overlay_scrollbars`).
     overlay_scrollbars: Signal<bool>,
     /// Editors' caret width in points (`Ui::set_caret_width`).
@@ -2364,6 +3114,7 @@ impl Ui {
             observed_sizes: RefCell::default(),
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
+            fresh_visibility: RefCell::default(),
             visibility_margins: RefCell::default(),
             margins_checked: Cell::new(0),
             scroll_padding: RefCell::default(),
@@ -2388,6 +3139,7 @@ impl Ui {
             elastic: Default::default(),
             paging: Default::default(),
             scroll_reveals: Default::default(),
+            drag_scroll: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
             scrollbar_styles: Default::default(),
             held_scrollbar_style: Default::default(),
@@ -3566,6 +4318,9 @@ impl Ui {
     pub(crate) fn scroll_reveal_state(&self) -> &RefCell<crate::scroll_reveal::State> {
         &self.storage.scroll_reveals
     }
+    pub(crate) fn drag_scroll_state(&self) -> &RefCell<crate::drag_scroll::State> {
+        &self.storage.drag_scroll
+    }
     pub(crate) fn elastic_state(&self) -> &RefCell<crate::elastic::State> {
         &self.storage.elastic
     }
@@ -3732,25 +4487,54 @@ impl Ui {
             }
             scene.bounds(node)
         };
-        if bounds.width <= 0. || bounds.height <= 0. {
+        self.snapshot_of(Some(node), take, bounds, max_width)
+    }
+    /// A picture of `rect` (in the window's points) as the window last
+    /// showed it, at most `max_width` pixels wide: only that area is read
+    /// and scaled, so a row's picture costs a row, not the window. What
+    /// lies past the window's edges is left out. `None` if the host takes
+    /// no pictures, or none of `rect` is in the window.
+    #[doc(hidden)]
+    pub fn snapshot_area(
+        &self,
+        rect: Rect,
+        max_width: u32,
+    ) -> Option<std::sync::Arc<crate::image::ImageData>> {
+        let take = self.storage.snapshotter.borrow().clone()?;
+        self.snapshot_of(None, take, rect, max_width)
+    }
+    /// `rect` (the window's points) of what shows `node`'s popup's surface
+    /// if it is in one that has a picture, else of the window's.
+    pub(crate) fn snapshot_of(
+        &self,
+        node: Option<NodeId>,
+        take: Snapshotter,
+        rect: Rect,
+        max_width: u32,
+    ) -> Option<std::sync::Arc<crate::image::ImageData>> {
+        if rect.width <= 0. || rect.height <= 0. {
             return None;
         }
         // In a popup past the window: what its own surface shows.
-        let root = {
+        let root = node.and_then(|node| {
             let scene = self.scene.borrow();
             scene
                 .popups()
                 .iter()
                 .copied()
                 .find(|root| scene.is_within(node, *root))
-        };
+        });
         let popup = self.storage.popup_snapshotter.borrow().clone();
         if let (Some(root), Some(popup)) = (root, popup)
-            && let Some(picture) = popup(root, bounds, max_width.max(1))
+            && let Some(picture) = popup(root, rect, max_width.max(1))
         {
             return Some(picture);
         }
-        take(bounds, max_width.max(1))
+        take(rect, max_width.max(1))
+    }
+    /// The host's picture taker (`on_snapshot`), if it has one.
+    pub(crate) fn snapshotter(&self) -> Option<Snapshotter> {
+        self.storage.snapshotter.borrow().clone()
     }
     /// The display's refresh period, as the host knows it (60 Hz until
     /// told): what the engine times itself steps by (a stretched view
@@ -3929,6 +4713,45 @@ impl Ui {
         }
         self.storage.margins_checked.set(observed.len());
     }
+    /// Whether each node observed since the frame last told them shows now
+    /// (`fresh_visibility`), told, for a preparation ahead of the frame's.
+    /// Out of line: only spare time building observed rows comes here.
+    #[cold]
+    #[inline(never)]
+    fn tell_fresh_visibility(&self) {
+        let fresh = std::mem::take(&mut *self.storage.fresh_visibility.borrow_mut());
+        let changed: Vec<_> = {
+            let scene = self.scene.borrow();
+            let observed = self.storage.observed_visibility.borrow();
+            let margins = self.storage.visibility_margins.borrow();
+            let mut pass = crate::scene::ShownPass::default();
+            fresh
+                .into_iter()
+                .filter_map(|node| {
+                    let observed = observed.get(&node).filter(|_| scene.contains(node))?;
+                    let margin = margins.get(&node).copied();
+                    let mut kept = observed.kept.get();
+                    let now = scene.shows_within_kept(node, margin, &mut kept, &mut pass);
+                    observed.kept.set(kept);
+                    let signal = &observed.signal;
+                    signal
+                        .with_untracked(|told| *told != now)
+                        .then(|| (node, signal.clone(), now))
+                })
+                .collect()
+        };
+        // Outside every borrow, as the frame's: what hears it may mount.
+        self.runtime.batch(|| {
+            for (node, signal, now) in changed {
+                if self.scene.borrow().contains(node) {
+                    signal.mutate(|told| {
+                        *told = now;
+                        true
+                    });
+                }
+            }
+        });
+    }
     pub(crate) fn observe_visibility(&self, node: NodeId) -> Signal<bool> {
         if let Some(observed) = self.storage.observed_visibility.borrow().get(&node) {
             return observed.signal.clone();
@@ -3938,6 +4761,7 @@ impl Ui {
             .observed_visibility
             .borrow_mut()
             .insert(node, Observed::new(signal.clone()));
+        self.storage.fresh_visibility.borrow_mut().push(node);
         self.storage.bounds_geometry_revision.set(None);
         signal
     }
@@ -4038,11 +4862,9 @@ impl Ui {
         true
     }
     /// What a desktop window does with ⌘C, ⌘X and ⌘V (Ctrl elsewhere) that
-    /// nothing in the view took: copy, cut or paste in the focused editor
-    /// through `platform` (its `View::on_paste` hearing a paste first), or
-    /// copy the selected display text, with its HTML. For what sends keys
-    /// straight to the view (`zgx inspect key`, tests) to reach the paths a
-    /// window's keys do. Whether it took the key.
+    /// nothing in the view took: [`Ui::edit_command`]'s copy, cut or paste.
+    /// For what sends keys straight to the view (`zgx inspect key`, tests)
+    /// to reach the paths a window's keys do. Whether it took the key.
     #[doc(hidden)]
     pub fn clipboard_shortcut(
         &self,
@@ -4056,29 +4878,50 @@ impl Ui {
         if !modifiers.primary_shortcut() || modifiers.alt {
             return false;
         }
-        let k = k.to_ascii_lowercase();
+        let command = match k.to_ascii_lowercase().as_str() {
+            "c" => EditCommand::Copy,
+            "x" => EditCommand::Cut,
+            "v" => EditCommand::Paste,
+            _ => return false,
+        };
+        self.edit_command(command, platform)
+    }
+    /// What the Edit menu's item does, as its shortcut does it, through
+    /// `platform`'s clipboard. In the focused editor: copy and cut through
+    /// its `View::on_copy` (`Ui::copy_from`), paste with its `View::on_paste`
+    /// hearing it first, Select All of its text. With none focused: copy the
+    /// selected display text, through its region's `View::on_selection_copy`,
+    /// with its HTML, and Select All of the region last selected in
+    /// ([`Ui::select_all`]). Whether anything took it.
+    #[doc(hidden)]
+    pub fn edit_command(
+        &self,
+        command: EditCommand,
+        platform: &dyn crate::platform::Platform,
+    ) -> bool {
+        let write = |text: String, html: Option<String>| match html {
+            Some(html) => platform.set_clipboard_rich_text(text, html),
+            None => platform.set_clipboard_text(text),
+        };
+        if command == EditCommand::SelectAll {
+            return self.select_all();
+        }
         let Some(editor) = self.focused_editor() else {
-            if k != "c" || !self.has_text_selection() {
+            if command != EditCommand::Copy || !self.has_text_selection() {
                 return false;
             }
-            self.copy_selection_from(|text, html| match html {
-                Some(html) => platform.set_clipboard_rich_text(text, html),
-                None => platform.set_clipboard_text(text),
-            });
+            self.copy_selection_from(write);
             return true;
         };
-        match k.as_str() {
-            "v" => {
+        match command {
+            EditCommand::Paste => {
                 let text = platform.clipboard_text();
                 self.paste_into(&editor, text.as_deref());
             }
-            "c" | "x" => {
-                let text = editor.copy();
-                if !text.is_empty() && platform.set_clipboard_text(text) && k == "x" {
-                    editor.cut();
-                }
+            EditCommand::Copy | EditCommand::Cut => {
+                self.copy_from(&editor, command == EditCommand::Cut, write);
             }
-            _ => return false,
+            EditCommand::SelectAll => {}
         }
         true
     }
@@ -4890,6 +5733,11 @@ impl Ui {
                         }
                     }
                 }
+                // All told from here: none is new to a preparation ahead.
+                let mut fresh = self.storage.fresh_visibility.borrow_mut();
+                if !fresh.is_empty() {
+                    fresh.clear();
+                }
             }
             // Publish outside every storage/scene borrow: geometry subscribers can
             // mount, dispose, translate, or reenter frame preparation.
@@ -4929,6 +5777,13 @@ impl Ui {
                     }
                 }
             });
+            // Ahead of the frame's, those observed since it last told them
+            // (rows spare time just built) are told: one coming into view
+            // knows it by the frame that shows it. The rest wait for the
+            // frame's, as every observer does.
+            if AHEAD && !self.storage.fresh_visibility.borrow().is_empty() {
+                self.tell_fresh_visibility();
+            }
             if layout_changed {
                 let editors: Vec<_> = self.storage.editors.borrow().values().cloned().collect();
                 // One layout for all a size change reached: the first's draw
@@ -5091,6 +5946,21 @@ impl Ui {
     /// The editor whose root is `node`, if it is one.
     pub fn editor(&self, node: NodeId) -> Option<EditorHandle> {
         self.storage.editors.borrow().get(&node).cloned()
+    }
+    /// For a text area whose root is `node`, which scrolls itself (not in a
+    /// scroll view): its viewport, how far its text is scrolled and how far
+    /// it can be, and whether it scrolls across (it doesn't wrap). None for
+    /// any other node, a one-line field's included (`drag_scroll`).
+    pub(crate) fn editor_scroll(&self, node: NodeId) -> Option<EditorScroll> {
+        let editors = self.storage.editors.borrow();
+        let editor = editors.get(&node).filter(|editor| editor.multiline)?;
+        let scrolled = &editor.hint.scrolled;
+        Some(EditorScroll {
+            viewport: scrolled.viewport,
+            offset: *scrolled.offset.borrow(),
+            limit: scrolled.limit.get(),
+            across: !editor.wrap.get(),
+        })
     }
     /// The editor whose root is `node` or inside it, if there is one.
     pub fn editor_within(&self, node: NodeId) -> Option<EditorHandle> {
@@ -5307,12 +6177,14 @@ impl Ui {
             && self.input.is_enabled(&self.scene.borrow(), job.owner)
     }
     /// Next deadline of a timed interaction: a key sequence waiting, a drag
-    /// resting on a destination toward springing it open, editor drag
-    /// autoscroll. Idle windows schedule nothing.
+    /// resting on a destination toward springing it open, or near a scroll
+    /// view's edge (`drag_scroll`), editor drag autoscroll. Idle windows
+    /// schedule nothing.
     pub fn next_interaction_deadline(&self) -> Option<Instant> {
         [
             self.input.next_key_deadline(),
             self.input.next_spring_deadline(),
+            crate::drag_scroll::next_step(self),
             self.next_editor_interaction_deadline(),
             self.next_selection_deadline(),
             crate::compose_scrollbar::next_fade(self),
@@ -5379,6 +6251,13 @@ impl Ui {
         };
         // A scroll view easing to where a reveal asked.
         let keys = if crate::scroll_reveal::advance(self, now) {
+            self.try_prepare_frame()?;
+            true
+        } else {
+            keys
+        };
+        // A drag held near a scroll view's edge.
+        let keys = if crate::drag_scroll::advance(self, now) {
             self.try_prepare_frame()?;
             true
         } else {
@@ -5989,7 +6868,15 @@ impl Ui {
         let draw_read_only = read_only.clone();
         let gesture = Rc::new(EditorDrag::default());
         let draw_gesture = gesture.clone();
-        let hint = Rc::new(EditorHint::new(value, multiline));
+        let hint = Rc::new(EditorHint::new(
+            value,
+            multiline,
+            Scrolled {
+                viewport,
+                offset: scroll.clone(),
+                limit: scroll_limit.clone(),
+            },
+        ));
         let wheel_hint = hint.clone();
         hint.composition_layer.set(Some(preedit_layer));
         let draw_hint = hint.clone();
@@ -6074,6 +6961,15 @@ impl Ui {
             // The gutter: as wide as the last line's number (two digits at
             // least, so the text does not move at line 10), and a gap.
             let numbered = draw_numbers.get();
+            // Atoms styled beyond a wash show through the styled lines.
+            if let Some(code) = draw_hint.code()
+                && (e.has_atoms()
+                    || code.atoms().is_some_and(|atoms| {
+                        atoms.atom_spans_of.get().is_some() || atoms.atom_style.borrow().is_some()
+                    }))
+            {
+                follow_atom_styles(code, &draw_hint, &e);
+            }
             // Long, or coloured a line at a time: laid out by its lines.
             let long = display_text.is_some()
                 || (draw_hint.lines && display.contains('\n'))
@@ -6238,8 +7134,25 @@ impl Ui {
                     }
                 };
             let caret_rect = layout.caret_position(caret_position);
-            let cx = caret_rect.x;
-            let cy = caret_rect.y;
+            // At a gap (`EditorHandle::set_gaps`): a short bar along it;
+            // else a hair inside or outside a span's edge (`set_caret_edges`).
+            let gap_at = draw_hint.gap().and_then(|gap| gap.at.get());
+            let (cx, cy) = match gap_at {
+                Some(n) => (
+                    0.,
+                    gap_boundary_y(&*layout, &e.text(), n) - crate::editor_gap::BAR_HEIGHT / 2.,
+                ),
+                None => (
+                    caret_rect.x
+                        + match draw_hint.edge() {
+                            Some(edge) if selection.range().is_empty() && e.preedit().is_none() => {
+                                edge.nudge(display_cursor)
+                            }
+                            _ => 0.,
+                        },
+                    caret_rect.y,
+                ),
+            };
             let line_height = caret_rect.height;
             let mut scroll = scroll_for_draw.borrow_mut();
             let reveal = !draw_hint.hold.replace(false) && draw_gesture.mode.get().is_none();
@@ -6320,7 +7233,13 @@ impl Ui {
                 .get()
                 .1
                 .unwrap_or_else(|| draw_caret_width.get());
-            s.set_style(caret, fixed(caret_width, line_height));
+            match gap_at {
+                Some(_) => s.set_style(
+                    caret,
+                    fixed(crate::editor_gap::BAR_WIDTH, crate::editor_gap::BAR_HEIGHT),
+                ),
+                None => s.set_style(caret, fixed(caret_width, line_height)),
+            }
             // Aligned, the text's box is its layout's width, which the text
             // aligns in as the layout does; its placeholder, the field's.
             let aligned_placeholder = factor > 0. && shown.is_some();
@@ -6342,13 +7261,19 @@ impl Ui {
             );
             text_style.text_wrap = draw_wrap.get();
             s.set_style(text, text_style);
-            s.set_transform(
-                text,
-                Transform {
-                    x: if aligned_placeholder { 0. } else { -scroll.0 },
-                    y: -scroll.1,
-                },
-            );
+            // A long text's node holds nothing (its lines show apart, in
+            // their layer): moved with each scroll, its box as tall as the
+            // text would repaint all the view shows. It stays, and is placed
+            // again once it shows text.
+            if !(long && shown.is_none()) {
+                s.set_transform(
+                    text,
+                    Transform {
+                        x: if aligned_placeholder { 0. } else { -scroll.0 },
+                        y: -scroll.1,
+                    },
+                );
+            }
             // A long text shows the lines in view, a text node each (by line
             // number: a scroll gives one node a new line, not each of them).
             let shown_lines = match &long_lines {
@@ -6380,6 +7305,12 @@ impl Ui {
                         .map_or(order.len(), |i| i + 1);
                     order.insert(at, layer);
                     s.reorder_children(viewport, &order);
+                    // Scroll content: the lines are placed in it where they
+                    // are in the text, and a scroll moves it alone, by whole
+                    // device pixels (the lines' glyphs snap to them anyway),
+                    // which the renderer copies, painting only what comes
+                    // into view.
+                    s.set_scroll_copy(layer, true);
                     code.line_layer.set(Some(layer));
                     pool.clear();
                 }
@@ -6389,6 +7320,16 @@ impl Ui {
                 let mut free: Vec<NodeId> = free.into_iter().map(|(_, id)| id).collect();
                 pool.extend(kept);
                 if let (Some(lines), Some(layer)) = (&long_lines, code.line_layer.get()) {
+                    // A jump of half the view or more (a page) leaves a copy
+                    // little to keep, and every line shown changes: the view
+                    // repaints whole, damaged first, so what each line damages
+                    // after is held by it at once.
+                    let at = s.transform(layer);
+                    if (scroll.1 + at.y).abs() * 2. >= inner_height
+                        || (scroll.0 + at.x).abs() * 2. >= inner_width
+                    {
+                        s.damage_shown(layer);
+                    }
                     for i in shown_lines.clone() {
                         if pool.iter().any(|(line, _)| *line == i) {
                             continue;
@@ -6408,8 +7349,19 @@ impl Ui {
                     }
                     for (i, id) in pool.iter() {
                         let line = lines.line_text(*i);
-                        let colored = draw_hint.line_cache().spans(lines, *i).and_then(|spans| {
-                            crate::editor_lines::styled_line(&line, &spans, color, size, &font)
+                        let cache = draw_hint.line_cache();
+                        let colored = cache.spans(lines, *i).and_then(|spans| {
+                            // Looks are read only where it has any.
+                            let style = |looks: &[crate::editor_lines::SpanLook]| {
+                                crate::editor_lines::styled_line(
+                                    &line, &spans, color, size, &font, looks,
+                                )
+                            };
+                            if cache.has_rare() {
+                                style(&cache.looks())
+                            } else {
+                                style(&[])
+                            }
                         });
                         match colored {
                             Some(rich) => {
@@ -6453,11 +7405,18 @@ impl Ui {
                         s.set_transform(
                             *id,
                             Transform {
-                                x: -scroll.0,
-                                y: lines.top(*i) - scroll.1,
+                                x: 0.,
+                                y: lines.top(*i),
                             },
                         );
                     }
+                    s.set_transform(
+                        layer,
+                        Transform {
+                            x: -scroll.0,
+                            y: -scroll.1,
+                        },
+                    );
                 }
                 for id in free {
                     s.remove(id);
@@ -6536,7 +7495,18 @@ impl Ui {
                 let mut shaped: Vec<crate::scene::TextMark> = Vec::new();
                 let mut ends = Vec::new();
                 {
-                    let decorations = code.decorations.borrow();
+                    let plain = code.decorations.borrow();
+                    // Atoms wash their label, among the decorations by start.
+                    let decorations: std::borrow::Cow<'_, [(std::ops::Range<usize>, Color)]> =
+                        if e.has_atoms() {
+                            washed_atoms(
+                                &e,
+                                code.atoms().and_then(|atoms| atoms.atom_wash.get()),
+                                &plain,
+                            )
+                        } else {
+                            std::borrow::Cow::Borrowed(&plain[..])
+                        };
                     // Those in the text in view: from where the first line
                     // shown starts (all of them, if it is short).
                     let shown_from = match &long_lines {
@@ -6610,6 +7580,105 @@ impl Ui {
                     }
                 }
                 drop(marked);
+                // Atoms' leading icons, in the room before each one's text.
+                // Pictures in their boxes (`SpanStyle::inline_svg`: an atom's,
+                // a highlighter's), and atoms' leading icons in their room.
+                let pictured = code
+                    .lines
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|lines| lines.pictured());
+                if pictured
+                    || code.atoms().is_some_and(|atoms| {
+                        atoms.atom_spans_of.get().is_some() || !atoms.atom_icons.borrow().is_empty()
+                    })
+                {
+                    let atoms = code.atoms_made();
+                    let mut wanted: Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> = Vec::new();
+                    if pictured && let Some(lines) = &long_lines {
+                        let shown = draw_hint.line_cache().pictures_between(
+                            lines,
+                            scroll.1 - inner_height,
+                            scroll.1 + 2. * inner_height,
+                            size,
+                        );
+                        wanted.extend(shown.into_iter().map(|(r, svg)| {
+                            (
+                                Rect::new(r.x - scroll.0, r.y - scroll.1, r.width, r.height),
+                                svg,
+                            )
+                        }));
+                    }
+                    if atoms.atom_spans_of.get().is_some() {
+                        let base = atoms.atom_style.borrow().clone();
+                        let text = e.text();
+                        for atom in e.atoms() {
+                            let icon = atom
+                                .style
+                                .as_deref()
+                                .and_then(|own| own.icon.clone())
+                                .or_else(|| base.as_deref().and_then(|b| b.icon.clone()));
+                            let Some(icon) = icon else {
+                                continue;
+                            };
+                            let Some(first) = text
+                                .get(atom.range.clone())
+                                .and_then(|label| label.chars().next())
+                                .map(|c| atom.range.start + c.len_utf8())
+                            else {
+                                continue;
+                            };
+                            let Some(r) = layout
+                                .selection_within(
+                                    atom.range.start..first,
+                                    scroll.1 - inner_height,
+                                    scroll.1 + 2. * inner_height,
+                                )
+                                .into_iter()
+                                .next()
+                            else {
+                                continue;
+                            };
+                            let size = icon.size.max(0.);
+                            wanted.push((
+                                Rect::new(
+                                    r.x - scroll.0,
+                                    r.y - scroll.1 + (r.height - size) / 2.,
+                                    size,
+                                    size,
+                                ),
+                                icon.svg,
+                            ));
+                        }
+                    }
+                    let mut shown = atoms.atom_icons.borrow_mut();
+                    while shown.len() > wanted.len() {
+                        s.remove(shown.pop().unwrap().0);
+                    }
+                    for (k, (rect, svg)) in wanted.into_iter().enumerate() {
+                        if k == shown.len() {
+                            let id = s.append(
+                                viewport,
+                                NodeKind::Svg(svg.clone()),
+                                fixed(rect.width, rect.height),
+                            );
+                            shown.push((id, svg.clone()));
+                        }
+                        let (id, was) = &mut shown[k];
+                        if !std::sync::Arc::ptr_eq(was, &svg) {
+                            s.set_kind(*id, NodeKind::Svg(svg.clone()));
+                            *was = svg;
+                        }
+                        s.set_style(*id, fixed(rect.width, rect.height));
+                        s.set_transform(
+                            *id,
+                            Transform {
+                                x: rect.x,
+                                y: rect.y,
+                            },
+                        );
+                    }
+                }
                 // The decorations, over the current line: a node of their own.
                 if !shaped.is_empty() || code.decoration_text.get().is_some() {
                     let size = (inner_width, inner_height);
@@ -6894,7 +7963,8 @@ impl Ui {
             }
             drop(underline);
             // Misspelled words: a dotted line under each, but not under the
-            // word the caret of a focused editor is in (it is being typed).
+            // word the caret of a focused editor is in (it is being typed),
+            // nor in an atom (a chip's label, which the web's leaves out).
             let caret_at =
                 (*focus.borrow() && selection.anchor == selection.focus).then_some(selection.focus);
             let marks: Vec<_> = draw_hint
@@ -6903,6 +7973,7 @@ impl Ui {
                 .iter()
                 .filter(|range| range.end <= e.len())
                 .filter(|range| caret_at.is_none_or(|at| at < range.start || at > range.end))
+                .filter(|range| !in_an_atom(e.atoms(), range))
                 .flat_map(|range| {
                     layout.selection_within(range.clone(), scroll.1, scroll.1 + inner_height)
                 })
@@ -7110,6 +8181,13 @@ impl Ui {
                             *slot = Some(callback);
                         }
                     }
+                    // Its atoms' listeners: none, and nothing to do, for most.
+                    if code.atoms().is_some_and(|atoms| {
+                        atoms.on_atoms.borrow().is_some() || atoms.on_drawn.borrow().is_some()
+                    }) || metric_editor.borrow().atom_changes_pending()
+                    {
+                        tell_atoms(code, &metric_editor);
+                    }
                 }
                 let arm = hook.borrow().as_ref().and_then(Weak::upgrade);
                 if let Some(arm) = arm {
@@ -7247,7 +8325,7 @@ impl Ui {
                 // Hit the visible edge, not an arbitrarily distant text row.
                 let x = (px - bounds.x).clamp(0., bounds.width.max(0.)) + offset.0;
                 let y = (py - bounds.y).clamp(0., (bounds.height - 0.01).max(0.)) + offset.1;
-                let hit = layout.hit_position(x, y);
+                let hit = hit_out_of_atoms(&edit, &*layout, layout.hit_position(x, y), x);
                 let (anchor, focus) = match mode {
                     EditorPointerSelection::Character(anchor) => (anchor, hit),
                     EditorPointerSelection::Unit { edges, line } => {
@@ -7419,6 +8497,33 @@ impl Ui {
                 if mutation { cx.prevent_default(); return; }
             }
             let event = cx.event.clone();
+            // The caret at a gap, or going into one (`EditorHandle::set_gaps`):
+            // only a text area whose app set gaps asks.
+            if let Some(gap) = hint.gap() {
+                let layout = |e: &TextEditor| {
+                    let s = scene.borrow();
+                    let (_, size, font) = typography.borrow().clone();
+                    committed_layout(&input_storage, &s, root, e, size,
+                        wrap.get().then_some(s.bounds(viewport).width.max(1.)), &font,
+                    )
+                };
+                let point = |x: f32, y: f32| {
+                    let s = scene.borrow();
+                    let bounds = s.bounds(viewport);
+                    let scroll = *scroll.borrow();
+                    let (x, y) = in_viewport(&s, viewport, x, y);
+                    (x - bounds.x + scroll.0, y - bounds.y + scroll.1)
+                };
+                let single = cx.click_count() == 1 && !cx.pointer_modifiers().shift;
+                if gap_event(gap, &event, &editor, &position, &layout, &point, single) {
+                    if matches!(event, InputEvent::PointerDown { .. }) {
+                        cx.capture_pointer();
+                    }
+                    cx.prevent_default();
+                    draw();
+                    return;
+                }
+            }
             if matches!(
                 event,
                 InputEvent::PointerDown { .. }
@@ -7431,6 +8536,9 @@ impl Ui {
             ) || (gesture.mode.get().is_some() && matches!(event, InputEvent::PointerMove { .. }))
             {
                 preferred_x.set(None);
+                if let Some(edge) = hint.edge() {
+                    edge.side.set(CaretSide::Outside);
+                }
             }
             let mut changed = false;
             match event {
@@ -7560,7 +8668,7 @@ impl Ui {
                     let (x, y) = in_viewport(&s, viewport, x, y);
                     let x = x - bounds.x + scroll.0;
                     let y = y - bounds.y + scroll.1;
-                    let hit = layout.hit_position(x, y);
+                    let hit = hit_out_of_atoms(&edit, &*layout, layout.hit_position(x, y), x);
                     // A press on the selection may drag it (as AppKit's text
                     // views and browsers do): it stays until the pointer
                     // moves or lets go.
@@ -7746,9 +8854,13 @@ impl Ui {
                                 text.text().to_owned(),
                             )]);
                         }
-                        // Over it: the caret where it would drop.
+                        // Over it: the caret where it would drop, unless the
+                        // app shows that itself (`drop_caret(false)`).
                         (crate::input::DragPhase::Over, Some(_)) if !read_only.get() => {
                             cx.accept_drag();
+                            if tab_indent.no_drop_caret.get() {
+                                return;
+                            }
                             let at = tab_indent.point.get().map_or(0, |point| point(drag.x, drag.y));
                             let mut edit = editor.borrow_mut();
                             if gesture.drop_restore.get().is_none() {
@@ -7939,7 +9051,23 @@ impl Ui {
                                 affinity: TextAffinity::After,
                             });
                         }
+                        // At an inline span's edge (`set_caret_edges`), the
+                        // first arrow crosses it without moving.
+                        let from = e.selection().focus;
+                        let edge = hint.edge();
+                        let mut crossed = false;
                         match key {
+                            Key::ArrowLeft | Key::ArrowRight
+                                if !word
+                                    && !modifiers.shift
+                                    && !modifiers.meta
+                                    && e.selection().range().is_empty()
+                                    && edge.is_some_and(|edge| {
+                                        edge.step(from, key == Key::ArrowRight)
+                                    }) =>
+                            {
+                                crossed = true;
+                            }
                             Key::ArrowLeft if cfg!(target_os = "macos") && modifiers.meta => {
                                 e.move_home(modifiers.shift)
                             }
@@ -8179,6 +9307,14 @@ impl Ui {
                             // on (a dialog around the field closes).
                             Key::Escape if e.preedit().is_some() => e.cancel_preedit(),
                             _ => return,
+                        }
+                        if !crossed && let Some(edge) = edge {
+                            match key {
+                                Key::ArrowLeft | Key::ArrowRight => {
+                                    edge.moved(from, e.selection().focus)
+                                }
+                                _ => edge.side.set(CaretSide::Outside),
+                            }
                         }
                     }
                     cx.prevent_default();
@@ -8454,7 +9590,11 @@ fn editor_word_segment(text: &str, index: usize) -> (usize, usize) {
     (start, end)
 }
 
-fn normalize_text(text: &str, multiline: bool) -> std::borrow::Cow<'_, str> {
+/// `text` as an editor takes it: `\r\n` and `\r` a line break, and in a
+/// single-line editor its lines joined (the DOM's text area with atoms
+/// takes what it is given so too).
+#[doc(hidden)]
+pub fn normalize_text(text: &str, multiline: bool) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if !holds(text, b'\r') && (multiline || !holds(text, b'\n')) {
         return Cow::Borrowed(text);
@@ -8520,6 +9660,13 @@ impl Ui {
             }
         });
     }
+}
+/// Whether `range` overlaps one of `atoms`: a misspelling there is not
+/// marked, as a chip's label (`contentEditable=false`) is not on the web.
+fn in_an_atom(atoms: &[crate::text_edit::Atom], range: &std::ops::Range<usize>) -> bool {
+    atoms
+        .iter()
+        .any(|atom| atom.range.start < range.end && range.start < atom.range.end)
 }
 /// A misspelled word's mark: a dotted line, as macOS draws one.
 fn spelling_mark(color: Color) -> NodeKind {
@@ -9266,6 +10413,59 @@ mod bounds_anchor_tests {
         offset.set(150.);
         ui.prepare_frame();
         assert!(as_walked(&ui) > shown);
+    }
+    /// A row's index and its observed visibility, kept as it mounts.
+    type ShownRow = (usize, Signal<bool>);
+    /// A row observed since the frame last told its observers (built, or
+    /// built again, as spare time runs ahead of the frame) is told whether
+    /// it shows by that preparation ahead: what it builds once near the view
+    /// is there by the frame that shows it. Observers told before wait for
+    /// the frame's, as every observer does.
+    #[test]
+    fn rows_observed_since_the_frame_are_told_whether_they_show_ahead_of_it() {
+        let mut ui = Ui::new(400., 100.);
+        let offset = ui.signal(0_f32);
+        let shown: Rc<RefCell<Vec<ShownRow>>> = Rc::default();
+        let keep = shown.clone();
+        ui.mount(
+            virtual_list(
+                offset.clone(),
+                20.,
+                0,
+                || 1000,
+                |i| i,
+                move |index, _, _| {
+                    let keep = keep.clone();
+                    div().w_full().h(20.).on_mount(move |handle| {
+                        let visible = handle.observe_visibility().expect("mounted");
+                        keep.borrow_mut().push((index.get(), visible));
+                    })
+                },
+            )
+            .w(400.)
+            .h(100.),
+        );
+        ui.prepare_frame();
+        let told = |row: usize| {
+            shown
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(i, _)| *i == row)
+                .map(|(_, v)| v.with_untracked(|v| *v))
+        };
+        assert_eq!(told(0), Some(true));
+        // Scrolled two rows on: rows 5 and 6 are built. Ahead of the frame,
+        // the new rows know they show.
+        offset.set(40.);
+        ui.try_prepare_frame_ahead().unwrap();
+        assert_eq!(told(5), Some(true), "built ahead, told ahead");
+        assert_eq!(told(6), Some(true), "built ahead, told ahead");
+        assert_eq!(told(2), Some(true));
+        // And the frame's preparation, which tells every observer, agrees.
+        ui.prepare_frame();
+        assert_eq!(told(5), Some(true));
+        assert_eq!(told(6), Some(true));
     }
     /// A row moved from one scroll view to another, a scroll view moved
     /// under a translated parent, and a row laid out again, each in the

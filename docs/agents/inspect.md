@@ -130,6 +130,12 @@ zgx inspect hover '#row'                               # the pointer there: what
 zgx inspect right-click '#row'                         # its context menu opens; its items are nodes to click
 zgx inspect drag '#card' '#done'                       # from one to another
 zgx inspect drag '#slider' 340,120                     # or to a point, window points
+zgx inspect files hover '#dropzone' a.pdf b.png        # files from a file manager, over a node or x,y (its on_file_hover)
+zgx inspect files drop '#dropzone' a.pdf b.png         # let go there: a FileDrop each, then FilesDrop (its on_file_drop)
+zgx inspect files leave                                # the drag left the window
+zgx inspect text-drop '#field' --text 'Hi' --html '<b>Hi</b>'   # text from another app, let go there
+zgx inspect text-drop '#note' --hover-only             # only over it: whether it would drop (a destination's highlight)
+zgx inspect prefers reduced-motion on                  # what zgx reads as the system's; `system` gives it back
 zgx inspect type '#composer' 'Write me a function'     # clicks it, then types
 zgx inspect type --no-click ' and a test'              # where focus is: no click, so the caret stays where it is
 zgx inspect key Enter                                  # Escape, Tab, cmd+k, alt+ArrowDown, shift+Tab, F5…
@@ -138,12 +144,12 @@ zgx inspect scroll '#transcript' 400                   # points; down is positiv
 zgx inspect command new                                # a ui.command, as its menu item or shortcut runs it
 zgx inspect set current '"c1"'                         # a named state, the value as JSON
 zgx inspect wait '"Copy"' --timeout 8000               # until it shows
-zgx inspect wait '#reply' --text 'words'               # until its text holds this
+zgx inspect wait '#reply' --text 'words'               # until its text, or a field's value, holds this
 zgx inspect wait '#spinner' --gone
 zgx inspect sleep 500                                  # let the app run
 ```
 
-`hover`, `right-click` and `drag` take a target, whose middle they use, or `x,y` in window points. `drag` presses, moves past the drag threshold and on in steps, as a hand does, so what lies between sees it pass (`on_drag_over`), then releases. Everything happens within the window: a drag can't leave it, so `on_drag_outside` and other apps' drops need a real one.
+`hover`, `right-click` and `drag` take a target, whose middle they use, or `x,y` in window points. `files` and `text-drop` reach what the desktop host's own events do (files from a file manager, text from another app), so an OS drop is tested headless. A `files drop` delivers in Linux's order, a `FileDrop` for each file and then one `FilesDrop`. macOS and Windows deliver the same events but send `FilesDrop` after a queue, so don't rely on the spacing. `prefers reduced-motion` changes only what this process reads as the system's preference, never the system's setting. `drag` presses, moves past the drag threshold and on in steps, as a hand does, so what lies between sees it pass (`on_drag_over`), then releases. Everything happens within the window: a drag can't leave it, so `on_drag_outside` and other apps' drops need a real one.
 
 `cmd` is Command on macOS and Control elsewhere, as commands' keys are. A key goes where focus is: `type` or `click` an input first. After an action the interface is laid out again before the next command reads it, so `click` then `tree` shows the result; for what takes time (a fetch, a streamed reply, an animation), `wait` on what it will show rather than sleeping.
 
@@ -157,7 +163,7 @@ zgx inspect clipboard set --files notes.pdf shot.png   # as a file manager copie
 zgx inspect key cmd+v                                  # pastes it into the focused editor (ctrl+v off macOS)
 ```
 
-`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. Use that for QA and off-screen sessions. `--files` needs it: the system's clipboard takes no files from here, and the readback's `files:` line lists what a paste would hear.
+`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. Use that for QA sessions; an off-screen session (`ZGX_OFFSCREEN=1`) has one of its own anyway, unless `ZGX_CLIPBOARD` names another (`system`, the person's). `--files` needs it: the system's clipboard takes no files from here, and the readback's `files:` line lists what a paste would hear.
 
 ## Popovers, menus and other popups
 

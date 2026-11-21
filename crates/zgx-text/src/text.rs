@@ -2207,6 +2207,8 @@ fn rich_buffer_built<const BOX_SPANS: bool>(
     // Its inline boxes, found at the first: a box's run is a padded one,
     // which most text has none of.
     let mut boxes = None;
+    // A run with room before it only (an atom's lead, `TextRun::padding`).
+    let mut leads = false;
     let mut index = 0;
     while index < runs.len() {
         let run = &runs[index];
@@ -2225,7 +2227,15 @@ fn rich_buffer_built<const BOX_SPANS: bool>(
         }
         let mut attributes = attrs(&run.font, run.font_size.max(1.));
         if run.padding[0] > 0. {
-            attributes = attributes.padding(run.padding[0] / run.font_size.max(1.));
+            // Negative down: all of it before the text (`TextRun::padding`),
+            // which the shaper takes as a negative padding.
+            let across = if run.padding[1] < 0. {
+                leads = true;
+                -2. * run.padding[0]
+            } else {
+                run.padding[0]
+            };
+            attributes = attributes.padding(across / run.font_size.max(1.));
             if run.font.features.is_inline_box() {
                 let boxes = boxes.get_or_insert_with(|| rich.inline_boxes());
                 attributes = attributes.inline_box(box_at(boxes, run.range.start));
@@ -2260,6 +2270,10 @@ fn rich_buffer_built<const BOX_SPANS: bool>(
     );
     if boxes.is_some() {
         buffer.find_inline_boxes();
+    }
+    // An atom's lead (its icon): its line may break before it.
+    if leads {
+        buffer.find_leads();
     }
     // Its lines take CSS's line box.
     if BOX_SPANS {
@@ -3045,6 +3059,14 @@ pub fn rich_decorations_in<'a>(
                         strike: false,
                     });
                 }
+                // A lead's room (an atom's icon, `TextRun::padding` negative
+                // down) is no text: its lines start after it, as the web's
+                // decorations cover the text, not an inline box's padding.
+                let left = if run.padding[1] < 0. {
+                    (left + 2. * run.padding[0]).min(right)
+                } else {
+                    left
+                };
                 for (decoration, y, strike) in [
                     (
                         run.underline,
@@ -3153,6 +3175,95 @@ mod wash_tests {
             .filter(|d| d.background)
             .map(|d| d.bounds)
             .collect()
+    }
+
+    /// A mention's underline starts at its name, after its icon's room
+    /// (a lead: half across, negative down), not under the icon.
+    #[test]
+    fn an_underline_starts_after_a_leads_room() {
+        let text = "ask Ada now";
+        let lined = |range: std::ops::Range<usize>, padding: [f32; 2]| TextRun {
+            range,
+            padding,
+            underline: Some(zgx::rich_text::Decoration::new(1.)),
+            font_size: 18.,
+            ..Default::default()
+        };
+        let underline_left = |padding: [f32; 2]| {
+            let rich = RichText::new(
+                text,
+                vec![
+                    run(0..4, None),
+                    lined(4..5, padding),
+                    lined(5..7, [0.; 2]),
+                    run(7..11, None),
+                ],
+            )
+            .unwrap();
+            let mut fonts = FontSystem::new();
+            let buffer = rich_buffer(&mut fonts, &rich, Some(600.), None);
+            rich_decorations(&buffer, &rich, &mut fonts)
+                .into_iter()
+                .filter(|d| !d.background && d.run == 1)
+                .map(|d| d.bounds.x)
+                .fold(f32::MAX, f32::min)
+        };
+        let plain = underline_left([0.; 2]);
+        let led = underline_left([10., -1.]);
+        assert!(
+            (led - plain - 20.).abs() < 0.5,
+            "after the 20 point room: {plain} {led}"
+        );
+    }
+
+    /// An atom with a lead (its icon, an atomic inline box as the web's
+    /// inline-flex chip) right after text, no space between: a narrow line
+    /// breaks before it, the atom whole on the next. Text glued to text
+    /// still breaks only where it did.
+    #[test]
+    fn a_line_breaks_before_an_atoms_lead() {
+        let text = "see 2010.pdfAda";
+        let rich = |padding: [f32; 2]| {
+            let at = |range: std::ops::Range<usize>, padding: [f32; 2]| TextRun {
+                range,
+                padding,
+                font_size: 18.,
+                ..Default::default()
+            };
+            RichText::new(
+                text,
+                vec![at(0..12, [0.; 2]), at(12..13, padding), at(13..15, [0.; 2])],
+            )
+            .unwrap()
+        };
+        let mut fonts = FontSystem::new();
+        let line_of = |buffer: &Buffer, at: usize| {
+            buffer
+                .layout_runs()
+                .position(|line| line.glyphs.iter().any(|g| g.start == at))
+                .unwrap()
+        };
+        // As wide as "see 2010.pdf" and a little: no room for the atom too.
+        let whole = rich_buffer(&mut fonts, &rich([10., -1.]), None, None);
+        let pdf = whole
+            .layout_runs()
+            .flat_map(|line| line.glyphs.iter())
+            .find(|g| g.start == 11)
+            .map(|g| g.x + g.w)
+            .unwrap();
+        let led = rich_buffer(&mut fonts, &rich([10., -1.]), Some(pdf + 4.), None);
+        assert_eq!(line_of(&led, 4), 0, "the file name stays on the first line");
+        assert_eq!(
+            [12, 13, 14].map(|at| line_of(&led, at)),
+            [1; 3],
+            "the atom whole on the next"
+        );
+        let plain = rich_buffer(&mut fonts, &rich([0.; 2]), Some(pdf + 4.), None);
+        assert_eq!(
+            line_of(&plain, 4),
+            line_of(&plain, 12),
+            "text glued to text keeps together"
+        );
     }
 
     /// A chip with an icon is runs of its own (the icon's room, its text,

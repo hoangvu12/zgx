@@ -18,10 +18,14 @@ mod composition_events;
 mod composition_focus_scroll;
 #[path = "../cursors.rs"]
 mod cursors;
+#[path = "../disabled_inherited.rs"]
+mod disabled_inherited;
 #[path = "../document_events.rs"]
 mod document_events;
 #[path = "../drag_drop.rs"]
 mod drag_drop;
+#[path = "../drag_scroll.rs"]
+mod drag_scroll;
 #[path = "../focus_groups.rs"]
 mod focus_groups;
 #[path = "../focus_removal.rs"]

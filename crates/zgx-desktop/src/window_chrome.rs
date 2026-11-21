@@ -189,13 +189,33 @@ pub(crate) fn zoom_buttons(window: &winit::window::Window, titlebar: Titlebar, z
 #[doc(hidden)]
 pub type TitlebarArea = (Option<zgx::scene::Rect>, Option<zgx::scene::Rect>);
 
+/// A resize `debug_titlebar_mid_resize` made: the height asked for and the
+/// one the window took, and the title bar as zgx reads it where winit
+/// reports the resize (None: nothing reported one, the frame unchanged),
+/// then once AppKit is done.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct TitlebarResize {
+    /// The window's frame height asked for.
+    pub asked: f64,
+    /// The frame height the window took.
+    pub took: f64,
+    /// The title bar read where winit reports the resize: None when
+    /// nothing reported one.
+    pub during: Option<TitlebarArea>,
+    /// The title bar once AppKit is done with the resize.
+    pub after: TitlebarArea,
+}
+
 /// Test hook (macOS; main thread): a bare window with the inset title bar is
-/// resized to each of `heights` as Accessibility resizes a window (Raycast,
-/// Rectangle), and for each, the title bar's area and buttons as zgx reads
+/// resized as Accessibility resizes a window (Raycast, Rectangle) to each
+/// of the heights `heights` gives for its screen's visible height (what a
+/// snapped window fills at most: AppKit keeps an on-screen window's frame
+/// within it), and for each, the title bar's area and buttons as zgx reads
 /// them where winit reports the resize, then once AppKit is done. Empty
 /// elsewhere.
 #[doc(hidden)]
-pub fn debug_titlebar_mid_resize(heights: &[f64]) -> Vec<[TitlebarArea; 2]> {
+pub fn debug_titlebar_mid_resize(heights: impl FnOnce(f64) -> Vec<f64>) -> Vec<TitlebarResize> {
     #[cfg(target_os = "macos")]
     {
         mac::titlebar_mid_resize(heights)
@@ -2078,6 +2098,53 @@ pub(crate) fn occluded(window: &winit::window::Window) -> Option<bool> {
     }
 }
 
+/// `ZGX_OFFSCREEN=1`: test and probe sessions keep their windows from anyone's
+/// screen: invisible and click-through, out of Mission Control and window
+/// cycling, never activating, with no Dock icon or Cmd-Tab place, while they
+/// go on drawing (it implies `ZGX_RENDER_WHEN_COVERED`) and answering
+/// `zgx inspect` (its snapshots are zgx's own frames).
+pub(crate) static OFFSCREEN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    zgx::env::var_os("ZGX_OFFSCREEN").is_some_and(|v| !v.is_empty() && v != "0")
+});
+
+/// Hides `window` from the screen as `OFFSCREEN` says (macOS).
+pub(crate) fn send_offscreen(window: &winit::window::Window) {
+    #[cfg(target_os = "macos")]
+    if let Some(window) = mac::ns_window(window) {
+        hide_ns_window(&window);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
+/// Whether anything may be put on the screen: not under `OFFSCREEN`, whose
+/// windows are never ordered in (made hidden, a show, focus, restore,
+/// fullscreen or zoom of one does nothing) and which shows no popup, native
+/// menu, dialog, alert, notification, look-up or browser. WindowServer lists
+/// none of its windows on any screen.
+pub(crate) fn may_show() -> bool {
+    !*OFFSCREEN
+}
+
+/// A shown window's alpha: none while `OFFSCREEN` (macOS's popup panels).
+#[cfg(target_os = "macos")]
+pub(crate) fn shown_alpha() -> f64 {
+    if *OFFSCREEN { 0. } else { 1. }
+}
+
+/// `send_offscreen` for a window zgx made itself (a popup's).
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_ns_window(window: &objc2_app_kit::NSWindow) {
+    use objc2_app_kit::NSWindowCollectionBehavior;
+    // AppKit keeps a titled window on a screen as it shows, so it is made unseen instead of moved
+    window.setAlphaValue(0.);
+    window.setIgnoresMouseEvents(true);
+    window.setHasShadow(false);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::Transient | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+}
+
 pub(crate) fn double_click(window: &winit::window::Window) {
     #[cfg(target_os = "macos")]
     mac::double_click(window);
@@ -2730,11 +2797,14 @@ mod mac {
     }
 
     /// Test hook (`debug_titlebar_mid_resize`): a bare window with the inset
-    /// title bar, its frame set `heights` tall in turn as Accessibility sets
-    /// it (`setFrame:display:`), and `titlebar_area` read where winit reports
+    /// title bar, its frame set as tall as `heights` gives for its screen's
+    /// visible height, in turn, as Accessibility sets it
+    /// (`setFrame:display:`), and `titlebar_area` read where winit reports
     /// each resize: as the content view's frame changes. Each reading, then
     /// one once AppKit is done with the resize.
-    pub(super) fn titlebar_mid_resize(heights: &[f64]) -> Vec<[super::TitlebarArea; 2]> {
+    pub(super) fn titlebar_mid_resize(
+        heights: impl FnOnce(f64) -> Vec<f64>,
+    ) -> Vec<super::TitlebarResize> {
         use objc2::MainThreadMarker;
         use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize};
         let Some(mtm) = MainThreadMarker::new() else {
@@ -2788,16 +2858,23 @@ mod mac {
                 &block,
             )
         };
+        let visible = window
+            .screen()
+            .map_or(0., |screen| screen.visibleFrame().size.height);
         let mut readings = Vec::new();
-        for &height in heights {
+        for asked in heights(visible) {
             let mut frame = window.frame();
             // As Accessibility's AXSize: the top left stays.
-            frame.origin.y += frame.size.height - height;
-            frame.size.height = height;
+            frame.origin.y += frame.size.height - asked;
+            frame.size.height = asked;
             seen.borrow_mut().clear();
             window.setFrame_display(frame, false);
-            let during = seen.borrow().last().copied().unwrap_or((None, None));
-            readings.push([during, titlebar_area_of(&window)]);
+            readings.push(super::TitlebarResize {
+                asked,
+                took: window.frame().size.height,
+                during: seen.borrow().last().copied(),
+                after: titlebar_area_of(&window),
+            });
         }
         // SAFETY: the observer `addObserverForName:` returned.
         unsafe { center.removeObserver(observer.as_ref()) };
@@ -2844,9 +2921,7 @@ mod mac {
             (frame.origin.y + frame.size.height, frame.size.height)
         };
         let (window_top, _) = in_window(&content);
-        let (top, container_height) = container
-            .as_deref()
-            .map_or((window_top, 0.), |container| in_window(container));
+        let (top, container_height) = container.as_deref().map_or((window_top, 0.), in_window);
         // The content covers the title bar (a full-size content view): the
         // bar is what the content's layout rect leaves out. Until AppKit has
         // moved the container to the window's new top, that rect may be the

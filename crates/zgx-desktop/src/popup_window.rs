@@ -859,6 +859,9 @@ mod macos {
             );
             window.setAcceptsMouseMovedEvents(true);
             window.setBecomesKeyOnlyIfNeeded(true);
+            if *crate::window_chrome::OFFSCREEN {
+                crate::window_chrome::hide_ns_window(&window);
+            }
             let host = CALayer::new();
             host.setHidden(true);
             let content = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
@@ -1039,10 +1042,12 @@ mod macos {
                 let number = self.window.windowNumber();
                 PREVIEWS.with(|previews| previews.borrow_mut().retain(|other| *other != number));
             }
-            self.window.setAlphaValue(1.);
-            self.window.setIgnoresMouseEvents(false);
+            self.window
+                .setAlphaValue(crate::window_chrome::shown_alpha());
+            self.window
+                .setIgnoresMouseEvents(*crate::window_chrome::OFFSCREEN);
             // A menu's or a popover's rim, should a preview have had it off.
-            self.window.setHasShadow(true);
+            self.window.setHasShadow(!*crate::window_chrome::OFFSCREEN);
             if let Some(renderer) = &mut self.renderer {
                 renderer.trim();
             }
@@ -1347,9 +1352,14 @@ mod macos {
         panel
             .window
             .setFrameOrigin(NSPoint::new(-10_000., -10_000.));
-        panel.window.orderFront(None);
-        panel.window.orderOut(None);
-        panel.window.setAlphaValue(1.);
+        // Off-screen (`ZGX_OFFSCREEN`), not even there.
+        if crate::window_chrome::may_show() {
+            panel.window.orderFront(None);
+            panel.window.orderOut(None);
+        }
+        panel
+            .window
+            .setAlphaValue(crate::window_chrome::shown_alpha());
         POOL_PANELS.with(|pool| pool.borrow_mut().push(panel));
     }
 
@@ -1372,7 +1382,10 @@ mod macos {
     /// `ZGX_POPUP_WINDOWS=0` (inside their window, as elsewhere).
     pub(crate) fn enabled() -> bool {
         thread_local! {
-            static ON: bool = zgx::env::var_os("ZGX_POPUP_WINDOWS").is_none_or(|v| v != "0");
+            // Off-screen (`ZGX_OFFSCREEN`) too: inside their window, which
+            // draws them in its own frames.
+            static ON: bool = zgx::env::var_os("ZGX_POPUP_WINDOWS").is_none_or(|v| v != "0")
+                && crate::window_chrome::may_show();
         }
         ON.with(|on| *on)
     }
@@ -1549,7 +1562,9 @@ mod macos {
                     Some((ended, ((dx, dy), rect))) => {
                         let source = scene.bounds(ended.source);
                         panel.sync();
-                        panel.window.orderFront(None);
+                        if crate::window_chrome::may_show() {
+                            panel.window.orderFront(None);
+                        }
                         slide_back(
                             panel,
                             &parent,
@@ -1668,7 +1683,9 @@ mod macos {
                 if panel.preview.is_none() {
                     let shadow = window_shadow(scene, root);
                     if panel.window.hasShadow() != shadow {
-                        panel.window.setHasShadow(shadow);
+                        panel
+                            .window
+                            .setHasShadow(shadow && !*crate::window_chrome::OFFSCREEN);
                     }
                 }
                 if new {
@@ -1716,7 +1733,9 @@ mod macos {
                             _ => panel.window.setLevel(NSPopUpMenuWindowLevel),
                         }
                     }
-                    panel.window.orderFront(None);
+                    if crate::window_chrome::may_show() {
+                        panel.window.orderFront(None);
+                    }
                 }
                 if new || moved {
                     // Its rim (macOS 26 menus have no drop shadow, only a
@@ -1813,7 +1832,9 @@ mod macos {
                     let grab = (drag.x - rect.x, drag.y - rect.y);
                     let frame = Rect::new(x - grab.0, y - grab.1, rect.width, rect.height);
                     panel.place(&parent, &content, frame);
-                    panel.window.orderFront(None);
+                    if crate::window_chrome::may_show() {
+                        panel.window.orderFront(None);
+                    }
                 }
             }
         }
@@ -2092,7 +2113,8 @@ mod x11 {
         /// thread of its own until it is home and hidden.
         static SLIDING: RefCell<Vec<(std::thread::JoinHandle<()>, Popup)>> =
             const { RefCell::new(Vec::new()) };
-        static ON: bool = zgx::env::var_os("ZGX_POPUP_WINDOWS").is_none_or(|v| v != "0");
+        static ON: bool = zgx::env::var_os("ZGX_POPUP_WINDOWS").is_none_or(|v| v != "0")
+            && crate::window_chrome::may_show();
     }
 
     pub(crate) fn enabled() -> bool {
@@ -2717,7 +2739,7 @@ mod x11 {
                         continue;
                     };
                     // Mapped off screen, to take its first frame.
-                    popup.window.set_visible(true);
+                    popup.window.set_visible(crate::window_chrome::may_show());
                     transient_for(&popup.window, parent);
                     self.shown.push((root, popup));
                 }

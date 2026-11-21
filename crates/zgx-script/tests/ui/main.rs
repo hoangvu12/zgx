@@ -3,6 +3,10 @@
 // Each file loads its own `common` (a Harness of its own, which files
 // add methods to), as it did as a binary of its own.
 #![allow(clippy::duplicate_mod)]
+#[path = "../atom_pointer.rs"]
+mod atom_pointer;
+#[path = "../atom_style.rs"]
+mod atom_style;
 #[cfg(feature = "audio")]
 #[path = "../audio.rs"]
 mod audio;
@@ -14,6 +18,8 @@ mod container_queries;
 mod decision;
 #[path = "../decode_image.rs"]
 mod decode_image;
+#[path = "../dim.rs"]
+mod dim;
 #[path = "../display_contents.rs"]
 mod display_contents;
 #[path = "../drag_declined.rs"]
@@ -60,6 +66,8 @@ mod layout_gaps;
 mod layout_motion;
 #[path = "../layout_unsettled.rs"]
 mod layout_unsettled;
+#[path = "../lazy_branches.rs"]
+mod lazy_branches;
 #[path = "../lazy_ui.rs"]
 mod lazy_ui;
 #[path = "../list_drag_keeps_row.rs"]
@@ -68,6 +76,8 @@ mod list_drag_keeps_row;
 mod list_edges;
 #[path = "../list_estimate.rs"]
 mod list_estimate;
+#[path = "../list_fading_in.rs"]
+mod list_fading_in;
 #[path = "../list_failed_key.rs"]
 mod list_failed_key;
 #[path = "../list_focus_scroll.rs"]
@@ -122,6 +132,8 @@ mod sealed;
 mod selection;
 #[path = "../size_calc.rs"]
 mod size_calc;
+#[path = "../size_tokens.rs"]
+mod size_tokens;
 #[path = "../small_element_nodes.rs"]
 mod small_element_nodes;
 #[path = "../stack.rs"]

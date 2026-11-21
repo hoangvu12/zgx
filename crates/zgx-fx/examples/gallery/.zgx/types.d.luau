@@ -1517,6 +1517,10 @@ declare extern type Download with
 	function save_to(self, file: File | string, opts: DownloadOptions?): ()
 	-- The save dialog, suggesting `name`: the file saved to, or nil.
 	function ask(self, opts: DownloadOptions?): Promise<File?>
+	-- Internal, subject to change: saved with no dialog in the folder the
+	-- host names for downloads, under `name` made unique: the file once
+	-- it is whole, or nil if it stopped.
+	function save_temp(self, opts: DownloadOptions?): Promise<File?>
 	function cancel(self): ()
 end
 declare extern type Web with
@@ -2476,6 +2480,11 @@ export type NodeProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: number?,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: (number | Readable<number> | (() -> number))?,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: (boolean | Readable<boolean> | (() -> boolean))?,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -2549,6 +2558,12 @@ export type NodeProps = {
 	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: (boolean | Readable<boolean> | (() -> boolean))?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
@@ -2925,6 +2940,11 @@ export type Props = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -2998,6 +3018,12 @@ export type Props = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -3323,6 +3349,7 @@ export type Props_focus_on_press = boolean?
 export type Props_capture_keys = boolean?
 export type Props_role = AriaRole?
 export type Props_heading = number?
+export type Props_level = (number | Readable<number> | (() -> number))?
 export type Props_selected = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_checked = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_expanded = (boolean | Readable<boolean> | (() -> boolean))?
@@ -3348,6 +3375,7 @@ export type Props_tooltip_placement = Placement?
 export type Props_tooltip_interactive = boolean?
 export type Props_tooltip_delay = number?
 export type Props_disabled = (boolean | Readable<boolean> | (() -> boolean) | Styles)?
+export type Props_dim = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_hover = Styles?
 export type Props_active = Styles?
 export type Props_focus = Styles?
@@ -3627,6 +3655,11 @@ export type ContainerProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -3700,6 +3733,12 @@ export type ContainerProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -4090,6 +4129,11 @@ export type GlassProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -4163,6 +4207,12 @@ export type GlassProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -4562,6 +4612,11 @@ export type ScrollProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -4635,6 +4690,12 @@ export type ScrollProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -5051,6 +5112,11 @@ export type TextProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -5124,6 +5190,12 @@ export type TextProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -5499,6 +5571,11 @@ export type MarkdownViewProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -5572,6 +5649,12 @@ export type MarkdownViewProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -6044,6 +6127,11 @@ export type RichProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -6117,6 +6205,12 @@ export type RichProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -6486,6 +6580,11 @@ export type ImageProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -6559,6 +6658,12 @@ export type ImageProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -6945,6 +7050,11 @@ export type SvgProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -7018,6 +7128,12 @@ export type SvgProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -7515,6 +7631,11 @@ export type Scene3DProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -7588,6 +7709,12 @@ export type Scene3DProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -7980,6 +8107,11 @@ export type CanvasProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -8053,6 +8185,12 @@ export type CanvasProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -8454,6 +8592,11 @@ export type CheckboxProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -8527,6 +8670,12 @@ export type CheckboxProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -8906,6 +9055,11 @@ export type InputProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -8979,6 +9133,12 @@ export type InputProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -9200,6 +9360,10 @@ export type InputProps = {
 	active_descendant: (string | Readable<string?> | (() -> string?))?,
 	-- Several lines only: numbered in a gutter at the left (a code editor).
 	line_numbers: boolean?,
+	-- Internal, subject to change: false, text dragged over it leaves its
+	-- caret and selection where they are (the app shows where it would
+	-- drop); it still takes the drop where it is let go.
+	drop_caret: boolean?,
 	-- Several lines only: a line's styles, asked for the lines in view and
 	-- again only for one that changes. Given the line and what the line
 	-- before left (0 before the first), it returns spans `{ from, to,
@@ -9240,6 +9404,65 @@ export type InputProps = {
 	-- The first line in view, from 1, whenever it changes: an outline following
 	-- the text.
 	on_top_line: ((line: number) -> ())?,
+	-- Its atoms (chips): ranges of the text that edit as one unit, `{ id,
+	-- from, to, data?, style? }` each, `from` and `to` in characters from 0
+	-- (half-open), by `from`. Two-way, as `value` is: the editor writes it as
+	-- they are made, lost or moved, and setting it restores them (a draft's;
+	-- set the text first). The label stays in the text.
+	atoms: State<{ AtomItem }>?,
+	-- Told after atoms are made, lost or moved (an edit, an undo): what was
+	-- added and removed (a removed one with its `label` and the range it had),
+	-- all of them, and why: "edit", "undo", "redo" or "set".
+	on_atoms: ((change: AtomChange) -> ())?,
+	-- Internal, subject to change: an atom pressed and let go in place
+	-- (within 4 points, no text dragged over), with where, in the window's
+	-- points. True takes the press: the caret stays where it was, out of
+	-- the chip.
+	on_atom_press: ((atom: AtomItem, at: { x: number, y: number }) -> boolean?)?,
+	-- Internal, subject to change: the atom the pointer comes onto, with
+	-- its box on the line under the pointer (window points), and nil, nil as
+	-- it leaves; again when a scroll or a new layout moves it.
+	on_atom_hover: ((atom: AtomItem?, box: { x: number, y: number, width: number, height: number }?) -> ())?,
+	-- The wash behind atoms that have none of their own (`style.bg`).
+	-- Internal, subject to change: and how they show beyond it, as a
+	-- mention does (an atom's own `style` wins field by field).
+	atom_style: AtomLook?,
+}
+-- Internal, subject to change: how an atom shows. Its text's colour and
+-- weight, a line under it (the font's thickness, `offset` points below the
+-- baseline), and an icon in room before its text that stays with its first
+-- word as it wraps.
+export type AtomLook = {
+	bg: Color?,
+	color: Color?,
+	weight: number?,
+	underline: (boolean | { color: Color?, offset: number? })?,
+	icon: { src: string?, code: string?, size: number?, gap: number?, tint: Color? }?,
+	-- Its text shown as a picture instead (an equation), sized in EM of the
+	-- textarea's text: one caret unit, its text kept for copy and search.
+	svg: { src: string?, code: string?, width: number, height: number, descent: number? }?,
+}
+export type AtomItem = {
+	id: string?,
+	from: number,
+	to: number,
+	data: any?,
+	style: AtomLook?,
+	-- Only on a removed atom: the text it had.
+	label: string?,
+}
+export type AtomChange = {
+	reason: "edit" | "undo" | "redo" | "set",
+	atoms: { AtomItem },
+	added: { AtomItem },
+	removed: { AtomItem },
+}
+export type InsertAtomOptions = {
+	id: string?,
+	data: any?,
+	style: { bg: string? }?,
+	-- The characters it takes the place of (the `@que` typed to ask for it).
+	replace: { from: number, to: number }?,
 }
 -- `value` from 0 to 1, or nil: indeterminate (work of unknown size), a
 -- stretch of the bar sweeping across.
@@ -9459,6 +9682,11 @@ export type ProgressProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -9532,6 +9760,12 @@ export type ProgressProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -9902,6 +10136,11 @@ export type SliderProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -9972,6 +10211,12 @@ export type SliderProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -10360,6 +10605,11 @@ export type SegmentedProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -10433,6 +10683,12 @@ export type SegmentedProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -10814,6 +11070,11 @@ export type StepperProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -10887,6 +11148,12 @@ export type StepperProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -11269,6 +11536,11 @@ export type DisclosureProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -11342,6 +11614,12 @@ export type DisclosureProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -11735,6 +12013,11 @@ export type AccordionProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -11808,6 +12091,12 @@ export type AccordionProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -12175,6 +12464,11 @@ export type SectionProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -12248,6 +12542,12 @@ export type SectionProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -12640,6 +12940,11 @@ export type SeparatorProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -12713,6 +13018,12 @@ export type SeparatorProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -13088,6 +13399,11 @@ export type TabsProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -13161,6 +13477,12 @@ export type TabsProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -13558,6 +13880,11 @@ export type TreeProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -13631,6 +13958,12 @@ export type TreeProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -14024,6 +14357,11 @@ export type DataGridProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -14097,6 +14435,12 @@ export type DataGridProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -14486,6 +14830,11 @@ export type CalendarProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -14559,6 +14908,12 @@ export type CalendarProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -14941,6 +15296,11 @@ export type DatePickerProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -15014,6 +15374,12 @@ export type DatePickerProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -15394,6 +15760,11 @@ export type TimeFieldProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -15467,6 +15838,12 @@ export type TimeFieldProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -15846,6 +16223,11 @@ export type ComboboxProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -15919,6 +16301,12 @@ export type ComboboxProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -16306,6 +16694,11 @@ export type CommandPaletteProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -16379,6 +16772,12 @@ export type CommandPaletteProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -16754,6 +17153,11 @@ export type SelectProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -16827,6 +17231,12 @@ export type SelectProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -17209,6 +17619,11 @@ export type SplitProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -17282,6 +17697,12 @@ export type SplitProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -17720,6 +18141,11 @@ export type ListProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -17793,6 +18219,12 @@ export type ListProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -18262,6 +18694,11 @@ export type LayerProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -18335,6 +18772,12 @@ export type LayerProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -18724,6 +19167,11 @@ export type ModalProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -18797,6 +19245,12 @@ export type ModalProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -19204,6 +19658,11 @@ export type PopoverProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -19277,6 +19736,12 @@ export type PopoverProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -19694,6 +20159,11 @@ export type MenuItemProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	expanded: Props_expanded,
@@ -19763,6 +20233,12 @@ export type MenuItemProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -20141,6 +20617,11 @@ export type SubmenuProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -20214,6 +20695,12 @@ export type SubmenuProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -20609,6 +21096,11 @@ export type WebViewProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -20682,6 +21174,12 @@ export type WebViewProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -21077,6 +21575,11 @@ export type TerminalProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -21150,6 +21653,12 @@ export type TerminalProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -21520,6 +22029,11 @@ export type SlotProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -21593,6 +22107,12 @@ export type SlotProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22014,6 +22534,11 @@ export type EachOptions = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -22087,6 +22612,12 @@ export type EachOptions = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22472,6 +23003,11 @@ export type PresenceOptions = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -22545,6 +23081,12 @@ export type PresenceOptions = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22904,8 +23446,12 @@ declare ui: {
 	submenu: (props: SubmenuProps) -> Node,
 	list: (props: ListProps) -> Node,
 	-- `node` while `cond` is truthy, else `otherwise` (or nothing).
-	show: (cond: boolean | Readable<unknown> | (() -> unknown), node: Node, otherwise: Node?) -> Node,
-	switch: (value: string | Readable<unknown> | (() -> unknown), cases: { [CaseKey]: Node }, default: Node?) -> Node,
+	-- Internal, subject to change: a branch (`node`, `otherwise`, a case, the
+	-- default) may be a function returning the node, built only when it
+	-- shows, in a scope of its own: a row's branches that never show are
+	-- never built.
+	show: (cond: boolean | Readable<unknown> | (() -> unknown), node: Node | (() -> Node), otherwise: (Node | (() -> Node))?) -> Node,
+	switch: (value: string | Readable<unknown> | (() -> unknown), cases: { [CaseKey]: Node | (() -> Node) }, default: (Node | (() -> Node))?) -> Node,
 	-- A row per item of a list state; `build` gets the item and its index
 	-- (from 1). The item is `any`: annotate it to check it,
 	-- `function(tab: Tab, i)` (Luau infers a generic callback's parameter
@@ -23083,6 +23629,12 @@ declare ui: {
 		-- The byte, from 0, a click at `x`, `y` (the window's points, as a drop's)
 		-- would put the caret at.
 		offset_at: (el: Element, x: number, y: number) -> number?,
+		-- Internal, subject to change: an editor's atoms (see a textarea's
+		-- `atoms`). `label` made an atom at the caret, over the selection, or
+		-- over `replace`'s characters; one step of undo, the caret after it.
+		-- Its id, or nil for elements that are not editors.
+		insert_atom: (el: Element, label: string, options: InsertAtomOptions?) -> string?,
+		atoms: (el: Element) -> { AtomItem }?,
 		-- A textarea's line, from 1, at that place in its view; its caret stays.
 		scroll_to_line: (el: Element, line: number, options: { align: ("start" | "center" | "end" | "nearest")? }?) -> boolean,
 	},

@@ -24,6 +24,14 @@
 //!
 //! The `ui` and `anime` libraries are documented in `docs/scripting.md`.
 #![warn(missing_docs)]
+
+/// The commit this crate was built from: its full 40-hex id, or `"unknown"`
+/// when it was built from no git checkout and no packaged crate saying one
+/// (a tarball, say). Read from git's own files when it builds, so a cargo
+/// git checkout, a worktree and a path build each say what they hold.
+#[doc(hidden)]
+pub const BUILD_REV: &str = env!("ZGX_BUILD_REV");
+
 mod actions;
 mod anim;
 mod anime;
@@ -47,6 +55,7 @@ mod fetch_policy;
 mod journal;
 mod json;
 pub use elements_report::{ElementGroup, ElementsReport, ListedElement};
+mod atoms;
 mod errors;
 #[cfg(target_os = "macos")]
 mod file_events;
@@ -1843,6 +1852,8 @@ struct Inner {
     platform: io::SharedPlatform,
     /// The files the user picked in this host's dialogs.
     picked: io::Picked,
+    /// Where `d:save_temp` saves (`download_dir`).
+    downloads: Rc<io::Downloads>,
     /// What scripts may have of folders, and the ones kept past a run.
     folders: Rc<folder::Access>,
     /// `ui.args` and `ui.on_open` (`ScriptHost::args`, `open`).
@@ -2061,6 +2072,7 @@ impl ScriptHost {
             rewatch: RefCell::default(),
             platform: Rc::default(),
             picked: Rc::default(),
+            downloads: Rc::default(),
             folders: Rc::new(folder::Access::new(persist.clone())),
             opens: Rc::default(),
             show_errors: cfg!(debug_assertions),
@@ -2154,6 +2166,12 @@ impl ScriptHost {
         );
         #[cfg(feature = "audio")]
         host.0.audio.set_timers(host.0.timers.clone());
+        // No files in the browser: a sound's are fetched, through the host's
+        // transport and under its policy.
+        #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+        host.0
+            .audio
+            .set_fetch(host.0.fetcher.clone(), host.0.fetch_policy.clone());
         host.trim_when_idle();
         host
     }
@@ -2301,6 +2319,16 @@ impl ScriptHost {
                 Files::Disk => {}
             }
         })
+    }
+    /// The folder a page's downloads are saved into with no dialog
+    /// (Luau's `d:save_temp`), each under its suggested name made unique:
+    /// one of the app's own, temporary, which the app clears. Until it
+    /// names one, `d:save_temp` raises. Plugins need `Capability::Files`
+    /// for it, as for `d:save_to`.
+    #[doc(hidden)]
+    pub fn download_dir(self, dir: impl Into<PathBuf>) -> Self {
+        *self.0.downloads.dir.borrow_mut() = Some(dir.into());
+        self
     }
     /// Whether a script error shows over the interface, with where it
     /// happened (development), or not (what ships: the last good interface
@@ -2921,6 +2949,25 @@ impl ScriptHost {
         rules.set_guard(Rc::new(guard));
         // The VM already loaded hears it too; a later load's has it from
         // the start.
+        if let Some(loaded) = &*self.0.current.borrow()
+            && let Some(vm) = loaded._vms.last()
+        {
+            vm.lua.set_app_data(rules::Guarded(rules));
+        }
+    }
+    /// Asks `guard` of pages in place of [`guard`](Self::guard)'s
+    /// [`GuardKind::Web`]: each URL the app's scripts load (`:load`, `src`,
+    /// `html`'s base) and each navigation the platform starts, a main
+    /// frame's, an iframe's and a redirect's, told the id the page was made
+    /// under (`ui.web("tab")` gives `Some("tab")`; an anonymous `ui.web(opts)`
+    /// or `ui.webview` without `web`, `None`). An `Err` stops it, as
+    /// `guard`'s does. So one host lets its browser tabs reach what its
+    /// previews may not. Unset, `guard` decides as before. The last one set
+    /// applies, at once.
+    #[doc(hidden)]
+    pub fn web_guard(&self, guard: impl Fn(Option<&str>, &str) -> Result<(), String> + 'static) {
+        let rules = rules::start(&self.0);
+        rules.set_web_guard(Rc::new(guard));
         if let Some(loaded) = &*self.0.current.borrow()
             && let Some(vm) = loaded._vms.last()
         {
@@ -4789,6 +4836,7 @@ impl ScriptHost {
             actions: self.0.actions.clone(),
             platform: self.0.platform.clone(),
             picked: self.0.picked.clone(),
+            downloads: self.0.downloads.clone(),
             functions: self.0.functions.clone(),
             persist: self.0.persist.clone(),
             warnings: self.0.warnings.clone(),

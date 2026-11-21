@@ -141,6 +141,11 @@ pub struct ShapeBuffer {
     /// (`BufferLine::set_inline_boxes`), for its words: false outside
     /// `BufferLine::shape`.
     pub(crate) boxes: bool,
+
+    /// zgx: whether the line being shaped has a span with room before it
+    /// only (`BufferLine::set_leads`), for its words: false outside
+    /// `BufferLine::shape`.
+    pub(crate) leads: bool,
 }
 
 impl ShapeBuffer {
@@ -820,12 +825,19 @@ fn pad(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList, attrs: &At
         if padding.0.is_nan() {
             continue;
         }
+        // Negative: that much room before the span only (an editor atom's
+        // leading icon), none after.
+        let (before, after) = if padding.0 < 0. {
+            (-padding.0, 0.)
+        } else {
+            (padding.0, padding.0)
+        };
         if glyph.start == 0 || attrs_list.get_span(glyph.start - 1) != attrs {
-            glyph.x_advance += padding.0;
-            glyph.x_offset += padding.0;
+            glyph.x_advance += before;
+            glyph.x_offset += before;
         }
         if glyph.end >= line.len() || attrs_list.get_span(glyph.end) != attrs {
-            glyph.x_advance += padding.0;
+            glyph.x_advance += after;
         }
     }
 }
@@ -1419,14 +1431,17 @@ impl ShapeWord {
         let is_simple_ascii =
             word.is_ascii() && !word.chars().any(|c| c.is_ascii_control() && c != '\t');
 
-        // zgx patch: no spans, no attributes to compare.
+        // zgx patch: no spans, no attributes to compare. (A word in an inline
+        // box over text of its own, an editor atom shown as a picture, has
+        // spans: `in_text_box`, asked only on lines holding boxes.)
         if is_simple_ascii && !word.is_empty() && (attrs_list.spans.is_empty() || {
             let attrs_start = attrs_list.get_span(word_range.start);
             attrs_list.spans_iter().all(|(other_range, other_attrs)| {
                 word_range.end <= other_range.start
                     || other_range.end <= word_range.start
                     || attrs_start.compatible(&other_attrs.as_attrs())
-            })
+            }) && !(font_system.shape_buffer.boxes
+                && in_text_box(line, attrs_list, &word_range))
         }) {
             shaping.run(
                 &mut glyphs,
@@ -1437,7 +1452,9 @@ impl ShapeWord {
                 word_range.end,
                 span_rtl,
             );
-        } else if font_system.shape_buffer.boxes && word.contains('\u{FFFC}') {
+        } else if font_system.shape_buffer.boxes
+            && (word.contains('\u{FFFC}') || in_text_box(line, attrs_list, &word_range))
+        {
             // zgx: a word holding inline boxes (`Attrs::inline_box`), apart:
             // every other word reads no more for them than this test.
             build_boxed(
@@ -1519,16 +1536,24 @@ fn build_boxed(
     for (egc_i, egc) in word.grapheme_indices(true) {
         let start_egc = word_range.start + egc_i;
         let attrs_egc = attrs_list.get_span(start_egc);
-        let inline = egc
-            .starts_with('\u{FFFC}')
-            .then(|| attrs_egc.inline_box_of())
-            .flatten();
+        // A replacement character is a box; a box's span over other text
+        // shows that text as one box, as wide as its first grapheme.
+        let inline = attrs_egc.inline_box_of();
         if let Some(inline) = inline {
             if start_run < start_egc {
                 shaping.run(glyphs, font_system, line, attrs_list, start_run, start_egc, span_rtl);
             }
-            let after = start_egc + '\u{FFFC}'.len_utf8();
-            box_glyphs(glyphs, font_system, line, &attrs_egc, inline, start_egc, after);
+            let text = !egc.starts_with('\u{FFFC}');
+            let after = start_egc + if text { egc.len() } else { '\u{FFFC}'.len_utf8() };
+            let width = if !text
+                || start_egc == 0
+                || attrs_list.get_span(start_egc - 1) != attrs_egc
+            {
+                inline.width
+            } else {
+                0.0
+            };
+            box_glyphs(glyphs, font_system, line, &attrs_egc, inline, start_egc, after, width, text);
             start_run = after;
             attrs = if after < word_range.end {
                 attrs_list.get_span(after)
@@ -1558,6 +1583,7 @@ fn build_boxed(
 /// `y_offset` how far its top is above the baseline; its `x_offset` holds
 /// what the run font's strut (its ascent and half its leading) adds above
 /// the baseline, its line height the rest (`ShapeLine::inline_line_box`).
+#[allow(clippy::too_many_arguments)]
 fn box_glyphs(
     glyphs: &mut Vec<ShapeGlyph>,
     font_system: &mut FontSystem,
@@ -1566,6 +1592,8 @@ fn box_glyphs(
     inline: InlineBox,
     start: usize,
     end: usize,
+    width: f32,
+    text: bool,
 ) {
     // A span without metrics of its own has none here to scale by (the
     // buffer's come at layout): its glyph is sized in pixels, at a size of 1,
@@ -1621,10 +1649,13 @@ fn box_glyphs(
         _ => inline.extents(ascent, descent, x_height),
     };
     for (at, c) in line[start..end].char_indices() {
+        // Over text of its own (`in_text_box`): its first character the
+        // box's width, the rest none.
+        let advance = if !text || at == 0 { width } else { 0.0 };
         glyphs.push(ShapeGlyph {
             start: start + at,
             end: start + at + c.len_utf8(),
-            x_advance: inline.width / size,
+            x_advance: advance / size,
             y_advance: 0.0,
             x_offset: strut_top / size,
             y_offset: above / size,
@@ -1641,6 +1672,37 @@ fn box_glyphs(
             metrics_opt: Some(metrics),
         });
     }
+}
+
+/// zgx: whether `word_range` of `line` lies in an inline box's span over
+/// text of its own (not a replacement character): an editor atom shown as a
+/// picture, its text kept for copy and search. Asked only on lines holding
+/// boxes.
+/// zgx: where in `span_range` (from its start) spans with room before them
+/// only start (a negative padding, an editor atom's leading icon), in order.
+#[cold]
+#[inline(never)]
+fn lead_starts(attrs_list: &AttrsList, span_range: &Range<usize>) -> Vec<usize> {
+    attrs_list
+        .spans_iter()
+        .filter(|(range, attrs)| {
+            span_range.start < range.start
+                && range.start < span_range.end
+                && attrs.as_attrs().padding_opt.is_some_and(|padding| padding.0 < 0.)
+        })
+        .map(|(range, _)| range.start - span_range.start)
+        .collect()
+}
+
+#[cold]
+#[inline(never)]
+fn in_text_box(line: &str, attrs_list: &AttrsList, word_range: &Range<usize>) -> bool {
+    attrs_list.spans_iter().any(|(range, attrs)| {
+        range.start < word_range.end
+            && word_range.start < range.end
+            && attrs.as_attrs().padding_opt.is_some_and(LetterSpacing::is_inline_box)
+            && !line[range.start.min(line.len())..].starts_with('\u{FFFC}')
+    })
 }
 
 /// zgx patch: a line's words as `ShapeSpan::build` finds them in a line
@@ -1799,8 +1861,36 @@ impl ShapeSpan {
             cached_words.extend(words.drain(..).rev());
         }
 
+        // zgx: where spans with room before them only start (an editor atom's
+        // leading icon, an atomic inline box as the web's inline-flex chip):
+        // a line may break there too, as before a box. Asked only of a line
+        // said to have them (`BufferLine::set_leads`).
+        let mut leads = if font_system.shape_buffer.leads {
+            lead_starts(attrs_list, &span_range)
+        } else {
+            Vec::new()
+        }
+        .into_iter()
+        .peekable();
         let mut start_word = 0;
         for (end_lb, _) in unicode_linebreak::linebreaks(span) {
+            // A word before an atom's lead ends there.
+            while let Some(at) = leads.next_if(|&at| at < end_lb) {
+                if at > start_word {
+                    let mut word = cached_words.pop().unwrap_or_else(ShapeWord::empty);
+                    word.build(
+                        font_system,
+                        line,
+                        attrs_list,
+                        (span_range.start + start_word)..(span_range.start + at),
+                        level,
+                        false,
+                        shaping,
+                    );
+                    words.push(word);
+                    start_word = at;
+                }
+            }
             // Check if this break opportunity splits a likely ligature (e.g. "|>" or "!=")
             if end_lb > 0 && end_lb < span.len() {
                 let start_idx = span_range.start;

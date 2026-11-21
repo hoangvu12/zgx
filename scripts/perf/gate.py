@@ -123,6 +123,10 @@ SCENES = [
     ('micro-vscroll-fixed', 'zgx-desktop', 'micro_bench', {'SCENE': 'vscroll-fixed', 'OPS': '300', 'WARMUP': '50', 'RENDER': '0'}),
     ('micro-vscroll-variable', 'zgx-desktop', 'micro_bench', {'SCENE': 'vscroll-variable', 'OPS': '300', 'WARMUP': '50',
                                                               'RENDER': '0'}),
+    # A long text area scrolled a little a frame, as a wheel or a trackpad
+    # does (editor_scroll_bench): 2,000 lines of code, 12 points a step, laid
+    # out with the lines coming into view shaped and nothing drawn.
+    ('editor-scroll', 'zgx-desktop', 'editor_scroll_bench', {'FRAMES': '300'}),
     # The same three written in Luau, through ScriptHost (a binary of its
     # own: micro_bench links no script engine).
     ('micro-state-luau', 'zgx-desktop', 'micro_luau_bench', {'SCENE': 'state', 'OPS': '300', 'WARMUP': '50',
@@ -256,6 +260,13 @@ SCENES = [
     ('app-mail', 'zgx-script', 'list_state_bench', {'APP': 'mail', 'REPS': '2'}),
     # A list with an estimate (`ui.list { estimate = … }`): it runs per row.
     ('list-estimate', 'zgx-script', 'estimate_bench', {}),
+    # A library table scrolled 600 points at a time: the rows that come into
+    # view mount (Luau builders, each `ui.switch`/`ui.show`'s shown branch,
+    # styles, layout, text), as an app's library of papers does.
+    ('library-scroll', 'zgx-script', 'library_scroll_bench', {}),
+    # The same table with its branches as functions (`ui.switch`'s cases,
+    # `ui.show`'s rarely shown content): built only when they show.
+    ('library-scroll-lazy', 'zgx-script', 'library_scroll_lazy_bench', {}),
     # New text mounting, cold: a word's first shape.
     ('mount-text', 'zgx-script', 'mount_text_bench', {}),
     # An app's cold start: a chat feed decoded from the script's source into
