@@ -1342,6 +1342,7 @@ mod win {
             if self.caption.settings_changed.take() {
                 crate::system_colors::sync(ui);
                 crate::scrollers::sync(ui);
+                crate::lcd_text::sync();
             }
             if !self.caption.buttons {
                 return;

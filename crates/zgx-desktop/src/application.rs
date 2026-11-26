@@ -3277,6 +3277,10 @@ impl Host {
                     // kept: the next drawn is whole) until it changes,
                     // reported once; the rest of the app runs on. So does an
                     // error no frame can go on through.
+                    // Text for the screen's subpixels as ClearType is set
+                    // (a no-op unless that changed; plain wherever the
+                    // window or a layer isn't opaque).
+                    renderer.set_lcd_text(crate::lcd_text::order());
                     self.frames_tried += 1;
                     let rendered = crate::contain::run_frame(
                         &mut self.render_fault,

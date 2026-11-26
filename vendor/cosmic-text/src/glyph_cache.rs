@@ -25,6 +25,13 @@ bitflags::bitflags! {
         /// the renderer, for Core Text to draw the glyph at; swash ignores
         /// it.
         const SMOOTHING = 0b111 << 6;
+        /// zgx: drawn for an LCD screen's subpixels (ClearType's way): each
+        /// of the mask's red, green and blue its own coverage, sampled a
+        /// third of a pixel apart, red at the left (`LCD_BGR`: at the
+        /// right). Set after shaping, by the renderer.
+        const LCD = 1 << 9;
+        /// zgx: with `LCD`, the screen's subpixels in blue, green, red order.
+        const LCD_BGR = 1 << 10;
     }
 }
 

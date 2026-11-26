@@ -954,12 +954,9 @@ fn wrap_html(ctn: &str) -> String {
 	let c_end_frag = "\r\n<!--EndFragment-->\r\n</body>\r\n</html>";
 	let h_len = h_version.len()
 		+ h_start_html.len()
-		+ 10
-		+ h_end_html.len()
-		+ 10
-		+ h_start_frag.len()
-		+ 10
-		+ h_end_frag.len()
+		+ 10 + h_end_html.len()
+		+ 10 + h_start_frag.len()
+		+ 10 + h_end_frag.len()
 		+ 10;
 	let n_start_html = h_len + 2;
 	let n_start_frag = h_len + c_start_frag.len();

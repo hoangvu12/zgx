@@ -84,7 +84,9 @@ fn swash_image(
         Source::Outline,
     ])
     // Select a subpixel format
-    .format(Format::Alpha)
+    // zgx: for an LCD screen (`LCD`), each channel its subpixel's coverage
+    // (`lcd_format`).
+    .format(lcd_format(cache_key.flags))
     // Apply the fractional offset
     .offset(offset)
     .transform(if cache_key.flags.contains(CacheKeyFlags::FAKE_ITALIC) {
@@ -102,6 +104,22 @@ fn swash_image(
     .dilate_box(smoothing_dilation(cache_key))
     // Render the image
     .render(&mut scaler, cache_key.glyph_id)
+}
+
+/// zgx: the mask format `flags` ask for: plain coverage, or each of red,
+/// green and blue its subpixel's (`CacheKeyFlags::LCD`). A channel samples
+/// the outline moved against its subpixel's place: the left subpixel (red
+/// on an RGB screen) sees what lies a third of a pixel left of the centre.
+fn lcd_format(flags: CacheKeyFlags) -> Format {
+    const THIRD: f32 = 1. / 3.;
+    match (
+        flags.contains(CacheKeyFlags::LCD),
+        flags.contains(CacheKeyFlags::LCD_BGR),
+    ) {
+        (false, _) => Format::Alpha,
+        (true, false) => Format::CustomSubpixel([THIRD, 0., -THIRD]),
+        (true, true) => Format::CustomSubpixel([-THIRD, 0., THIRD]),
+    }
 }
 
 /// zgx: the dilation `cache_key`'s `SMOOTHING` level asks for, in pixels:

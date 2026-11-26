@@ -760,6 +760,11 @@ enum Shading {
     /// `shade` behind what's drawn (destination-over): a gradient text's
     /// box, marks, selection and shadows under its filled glyphs.
     Behind,
+    /// `shade`, with glyphs drawn for an LCD screen's subpixels
+    /// (`LCD_GLYPH`) blended channel by channel, by dual-source blending
+    /// (`LCD_MIX`): a draw holding such glyphs, over an opaque target.
+    /// Every other quad it holds draws as `Full` does.
+    Lcd,
 }
 fn shading(quad: &Quad, scale: f32) -> Shading {
     // A panel with square corners and no border only antialiases its edges:
@@ -811,6 +816,9 @@ struct QuadPipelines {
     /// `Shading::SourceIn`'s and `Shading::Behind`'s: gradient text's.
     source_in: std::cell::OnceCell<wgpu::RenderPipeline>,
     behind: std::cell::OnceCell<wgpu::RenderPipeline>,
+    /// `Shading::Lcd`'s, in a module of its own (`lcd_pipeline`): made
+    /// when a frame first draws LCD glyphs.
+    lcd: std::cell::OnceCell<wgpu::RenderPipeline>,
     /// The quad pipelines' group layouts (texture, viewport), for the
     /// polyline layout.
     texture_layout: wgpu::BindGroupLayout,
@@ -847,6 +855,11 @@ impl QuadPipelines {
             Shading::Polyline => return &self.polylines().pipeline,
             Shading::SourceIn => (&self.source_in, false, Some(SOURCE_IN)),
             Shading::Behind => (&self.behind, false, Some(BEHIND)),
+            Shading::Lcd => {
+                return self
+                    .lcd
+                    .get_or_init(|| lcd_pipeline(&self.device, &self.layout));
+            }
         };
         if let Some(pipeline) = cell.get() {
             return pipeline;
@@ -965,18 +978,44 @@ fn push_draw(
                 | Shading::FilterBlend(_)
                 | Shading::ImageEffect
         );
+    // Glyphs drawn for an LCD screen's subpixels (`LCD_GLYPH`, only ever
+    // placed for an opaque target) blend channel by channel: a draw not
+    // split goes whole with `Shading::Lcd`, which shades its other quads as
+    // `Full` does; a split one, its glyphs' runs.
+    let lcd = |quad: &Quad| quad.options[1] == LCD_GLYPH;
     if !(split || polylines) || draw.end <= draw.start {
-        draws.push(draw);
+        let lcd_draw = draw.end > draw.start
+            && draw.shading == Shading::Full
+            && draw.blur.is_none()
+            && matches!(draw.source, TextureSource::Atlas)
+            && quads[draw.start as usize..draw.end as usize]
+                .iter()
+                .any(lcd);
+        draws.push(match lcd_draw {
+            true => Draw {
+                shading: Shading::Lcd,
+                ..draw
+            },
+            false => draw,
+        });
         return;
     }
     // Quads of one shading, known already (a text's glyphs): one run.
     if let Some(shading) = glyphs.filter(|_| split && !polylines) {
+        let shading = match quads[draw.start as usize..draw.end as usize]
+            .iter()
+            .any(lcd)
+        {
+            true => Shading::Lcd,
+            false => shading,
+        };
         draws.push(Draw { shading, ..draw });
         return;
     }
     // A polyline stroke's quad holds its point count in `mask.z`.
     let kind_of = |quad: &Quad| match polylines && quad.mask[2] > 0. {
         true => Shading::Polyline,
+        false if lcd(quad) => Shading::Lcd,
         false if split => shading(quad, scale),
         false => draw.shading,
     };
@@ -1666,9 +1705,12 @@ fn firms_glyphs(scale: f32) -> bool {
     scale < SHARP_TEXT_BELOW && !cfg!(target_os = "macos")
 }
 /// A glyph's `options.y`: straight alpha, firmed where `firms_glyphs` says
-/// if a mask (a colour glyph's own colours stay as they are).
-fn glyph_texture(color: bool, scale: f32) -> f32 {
-    if !color && firms_glyphs(scale) {
+/// if a mask (a colour glyph's own colours stay as they are); an LCD
+/// glyph's subpixels firmed alike (`LCD_GLYPH`).
+fn glyph_texture(entry: AtlasEntry, scale: f32) -> f32 {
+    if entry.lcd {
+        LCD_GLYPH
+    } else if !entry.color && firms_glyphs(scale) {
         FIRM_GLYPH
     } else {
         1.
@@ -2041,6 +2083,9 @@ struct Shaped {
     quads: Vec<TextQuad>,
     /// Whether `quads` hold colour glyphs (`COLOR_GLYPH`).
     colored: bool,
+    /// The subpixel order its glyphs' keys are drawn for (`lcd_glyphs`),
+    /// none for plain coverage.
+    lcd: Option<LcdOrder>,
     /// How much its glyphs' keys are thickened (`text::smoothing`, macOS):
     /// its colour's level, `PER_RUN` for rich text's (each glyph its run's),
     /// none until keyed for its colours (`smooth_glyphs`).
@@ -2117,6 +2162,31 @@ fn smooth_glyphs(shaped: &mut Shaped, color: zgx::scene::Color) {
     shaped.smoothed_for = Some(color);
     shaped.atlas_epoch = u64::MAX;
 }
+/// The order of an LCD screen's subpixels, left to right, which text is
+/// drawn for (`GpuRenderer::set_lcd_text`): ClearType's two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LcdOrder {
+    /// Red, green, blue: most screens.
+    Rgb,
+    /// Blue, green, red.
+    Bgr,
+}
+/// Key `shaped`'s glyphs for an LCD screen's subpixels in `order`
+/// (`CacheKeyFlags::LCD`), or for plain coverage: its quads then hold other
+/// glyphs, placed again from the new keys.
+fn lcd_glyphs(shaped: &mut Shaped, order: Option<LcdOrder>) {
+    use cosmic_text::CacheKeyFlags;
+    let flags = match order {
+        None => CacheKeyFlags::empty(),
+        Some(LcdOrder::Rgb) => CacheKeyFlags::LCD,
+        Some(LcdOrder::Bgr) => CacheKeyFlags::LCD | CacheKeyFlags::LCD_BGR,
+    };
+    for glyph in &mut shaped.glyphs {
+        glyph.key.flags = (glyph.key.flags - CacheKeyFlags::LCD - CacheKeyFlags::LCD_BGR) | flags;
+    }
+    shaped.lcd = order;
+    shaped.atlas_epoch = u64::MAX;
+}
 /// The atlas's key: cosmic-text's, losslessly, with its scalar fields
 /// packed into words so it hashes and compares in a few operations.
 /// Four-byte aligned, its table's buckets are the size of those holding
@@ -2164,6 +2234,9 @@ struct AtlasEntry {
     /// A colour glyph's (an emoji's): its texels its own colours, which the
     /// text's colour doesn't tint (`COLOR_GLYPH`).
     color: bool,
+    /// A glyph drawn for an LCD screen's subpixels (`CacheKeyFlags::LCD`):
+    /// its texels each subpixel's coverage (`LCD_GLYPH`).
+    lcd: bool,
 }
 /// `TextQuad::paint[2]` of a colour glyph's quad (`AtlasEntry::color`):
 /// placed white, with its text's alpha, so `basic`'s colour times texel
@@ -4100,8 +4173,9 @@ impl<'p> Picks<'p> {
             Shading::Basic => self.basic,
             Shading::Opaque => self.opaque,
             Shading::Polyline => self.polyline.expect("made for a frame with polylines"),
-            // Drawn in a gradient text's layer alone (`gradient_text_quads`).
-            Shading::SourceIn | Shading::Behind => {
+            // Drawn in a gradient text's layer alone (`gradient_text_quads`);
+            // LCD glyphs into the window's target alone.
+            Shading::SourceIn | Shading::Behind | Shading::Lcd => {
                 self.quads.expect("drawn into layers").get(shading)
             }
         }
@@ -4167,7 +4241,8 @@ fn merged_shading(a: Shading, b: Shading) -> Option<Shading> {
         | Shading::ImageEffect
         | Shading::Polyline
         | Shading::SourceIn
-        | Shading::Behind => None,
+        | Shading::Behind
+        | Shading::Lcd => None,
     };
     Some(if cost(a)? >= cost(b)? { a } else { b })
 }
@@ -4951,6 +5026,7 @@ impl GpuContext {
             basic_clear: Default::default(),
             source_in: Default::default(),
             behind: Default::default(),
+            lcd: Default::default(),
             texture_layout: texture_layout.clone(),
             viewport_layout: viewport_layout.clone(),
             polylines: Default::default(),
@@ -5297,6 +5373,9 @@ pub struct GpuRenderer {
     /// next frame draws all of it again (`text::set_font_smoothing`).
     #[cfg(target_os = "macos")]
     smoothing_epoch: u64,
+    /// The subpixel order text is drawn for where it can be
+    /// (`set_lcd_text`, `lcd_now`), none for plain coverage everywhere.
+    lcd: Option<LcdOrder>,
     /// Consecutive presented frames whose damage covered the window.
     whole_frames: u32,
     /// The scene flush the retained target was last rendered from.
@@ -6154,6 +6233,7 @@ impl GpuRenderer {
             fresh: true,
             #[cfg(target_os = "macos")]
             smoothing_epoch: text::font_smoothing_epoch(),
+            lcd: None,
             whole_frames: 0,
             rendered_serial: None,
             copies: Vec::new(),
@@ -6823,6 +6903,40 @@ impl GpuRenderer {
     pub fn debug_never_keep(&mut self) {
         self.never_keep = true;
         self.kept = None;
+    }
+    /// Draw text for an LCD screen whose subpixels lie in `order`, as
+    /// ClearType does: each glyph's red, green and blue covered by their
+    /// own subpixel's share, three times as fine across as plain coverage.
+    /// None (the default) draws plain coverage. Only where it shows right:
+    /// below 2x, off macOS, on a device with dual-source blending, into
+    /// the window's own opaque target (an opaque background; never a
+    /// translucent window, frosted glass or an isolated layer, whose
+    /// pixels are blended again later). Elsewhere text stays plain.
+    pub fn set_lcd_text(&mut self, order: Option<LcdOrder>) {
+        let order = order.filter(|_| {
+            !cfg!(target_os = "macos")
+                && (self.device.features()).contains(wgpu::Features::DUAL_SOURCE_BLENDING)
+        });
+        if self.lcd != order {
+            self.lcd = order;
+            self.flush_pending();
+            self.fresh = true;
+        }
+    }
+    /// The subpixel order `set_lcd_text` took: none when not asked, or on a
+    /// device or platform that can't draw it.
+    pub fn lcd_text(&self) -> Option<LcdOrder> {
+        self.lcd
+    }
+    /// The subpixel order text drawn now is drawn for (`set_lcd_text`): none
+    /// where blending its channels apart wouldn't show right.
+    fn lcd_now(&self) -> Option<LcdOrder> {
+        self.lcd.filter(|_| {
+            !self.in_layer
+                && self.scale < SHARP_TEXT_BELOW
+                && self.background.3 == 255
+                && self.single_pass_format.is_none()
+        })
     }
     /// The colour the target clears to where nothing is drawn.
     pub fn set_background(&mut self, color: Color) {
@@ -11231,6 +11345,7 @@ impl GpuRenderer {
                             // (A twin's quads come with whether they hold colour glyphs,
                             // and its glyphs with how they are thickened.)
                             let mut twin_colored = false;
+                            let mut twin_lcd = None;
                             #[cfg(target_os = "macos")]
                             let mut twin_smoothing = (None, None);
                             let twin = content
@@ -11248,6 +11363,7 @@ impl GpuRenderer {
                                 })
                                 .map(|twin| {
                                     spare_glyphs.extend_from_slice(&twin.glyphs);
+                                    twin_lcd = twin.lcd;
                                     #[cfg(target_os = "macos")]
                                     {
                                         twin_smoothing = (twin.smoothing, twin.smoothed_for);
@@ -11374,6 +11490,7 @@ impl GpuRenderer {
                                 glyphs,
                                 quads: spare_quads,
                                 colored: twin_colored,
+                                lcd: twin_lcd,
                                 #[cfg(target_os = "macos")]
                                 smoothing: twin_smoothing.0,
                                 #[cfg(target_os = "macos")]
@@ -11402,6 +11519,21 @@ impl GpuRenderer {
                             };
                             if let Some(shaped) = held {
                                 smooth_glyphs(shaped, color);
+                            }
+                        }
+                        // Its glyphs for an LCD screen's subpixels where its
+                        // target is opaque (`lcd_now`), plain elsewhere: a
+                        // change, new glyphs.
+                        {
+                            let want = self.lcd_now();
+                            let held = match fresh.as_mut() {
+                                Some(shaped) => Some(shaped),
+                                None => self.shapes.get_mut(&item.id),
+                            };
+                            if let Some(shaped) = held
+                                && shaped.lcd != want
+                            {
+                                lcd_glyphs(shaped, want);
                             }
                         }
                         let snap = |value: f32| (value * self.scale).round() / self.scale;
@@ -11683,7 +11815,7 @@ impl GpuRenderer {
                                             }),
                                             paint: [
                                                 0.,
-                                                glyph_texture(a.color, self.scale),
+                                                glyph_texture(a, self.scale),
                                                 if a.color { COLOR_GLYPH } else { 0. },
                                                 0.,
                                             ],
@@ -12991,6 +13123,9 @@ impl GpuRenderer {
                 (_, Shading::ImageEffect) => None,
                 // Over a copy of the target under it (`d3d11_frame::Frame::blended`).
                 (_, Shading::Blend) => None,
+                // Never placed here: Direct3D 11 frames have no wgpu device
+                // with dual-source blending (`set_lcd_text`).
+                (_, Shading::Lcd) => Some("LCD glyphs"),
             })
     }
     /// What a batch of `source` samples with Direct3D 11: the glyph atlas,
@@ -16285,12 +16420,9 @@ impl GpuRenderer {
                             .iter_mut()
                             .zip(pixels.as_chunks::<4>().0)
                         {
-                            texel.copy_from_slice(&[
-                                255,
-                                255,
-                                255,
-                                pixel[0].max(pixel[1]).max(pixel[2]),
-                            ]);
+                            // Each subpixel's coverage, and the green's (the
+                            // outline unmoved: the plain glyph's) for alpha.
+                            texel.copy_from_slice(&[pixel[0], pixel[1], pixel[2], pixel[1]]);
                         }
                     }
                 }
@@ -16312,6 +16444,7 @@ impl GpuRenderer {
             left: p.left,
             top: p.top,
             color: matches!(image.content, SwashContent::Color),
+            lcd: matches!(image.content, SwashContent::SubpixelMask),
         };
         self.entries.insert(AtlasKey::from(key), Some(entry));
         stats.glyph_uploads += 1;
@@ -19297,7 +19430,7 @@ fn glyph_quad(
         color,
         paint: [
             0.,
-            glyph_texture(a.color, scale),
+            glyph_texture(a, scale),
             if a.color { COLOR_GLYPH } else { 0. },
             0.,
         ],
@@ -20753,6 +20886,80 @@ fn quad_pipeline(
             } else {
                 &targets[..1]
             },
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+/// `TextQuad::paint[1]` of a glyph drawn for an LCD screen's subpixels
+/// (`AtlasEntry::lcd`): a straight sample whose red, green and blue are
+/// each its subpixel's coverage, firmed as `FIRM_GLYPH` is (within
+/// `firmness`'s range), and whose alpha is the green's, the plain glyph's.
+const LCD_GLYPH: f32 = 1.375;
+/// `Shading::Lcd`'s fragment stage, after draw.wgsl: an LCD glyph's colour
+/// times each subpixel's coverage, and that coverage for how much of the
+/// target each channel keeps (dual-source blending); any other quad as
+/// `fs` shades it, its alpha for every channel's share. One call of
+/// `shade_texel` (given the texel sampled where `shade` would sample it):
+/// each call is inlined whole, and two doubled the time FXC took.
+const LCD_MIX: &str = "struct Lcd { @location(0) @blend_src(0) color:vec4<f32>, @location(0) @blend_src(1) share:vec4<f32> }
+@fragment fn fs_lcd(v:Out)->Lcd {
+ let tex=textureSample(atlas,tex_sampler,v.uv);
+ let lcd=abs(v.options.y-1.375)<.01;
+ let c=shade_texel(v,select(tex,vec4(1.),lcd),true);
+ if !lcd {return Lcd(c,vec4(c.a));}
+ let k=firmness(v.options.y,v.color.rgb);
+ let cover=vec3(firm(tex.r,k),firm(tex.g,k),firm(tex.b,k));
+ let share=c.a*cover;
+ let most=max(share.r,max(share.g,share.b));
+ return Lcd(vec4(c.rgb*cover,most),vec4(share,most));
+}";
+/// `Shading::Lcd`'s pipeline: draw.wgsl's vertex stage and `LCD_MIX`'s
+/// fragment stage, each channel of the target kept by its own share. Only
+/// on a device with dual-source blending (`GpuRenderer::lcd_now`).
+fn lcd_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout) -> wgpu::RenderPipeline {
+    let source = format!(
+        "enable dual_source_blending;\n{}\n{LCD_MIX}",
+        include_str!("draw.wgsl")
+    );
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("lcd glyphs"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let all = wgpu::vertex_attr_array![0=>Float32x4,1=>Float32x4,2=>Float32x4,3=>Float32x4,4=>Float32x4,5=>Float32x4,6=>Float32x4,7=>Float32x4];
+    let share = |dst_factor| wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor,
+        operation: wgpu::BlendOperation::Add,
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("lcd glyphs"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 128,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &all,
+            }],
+        },
+        primitive: QUAD_STRIP,
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_lcd"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: FORMAT,
+                blend: Some(wgpu::BlendState {
+                    color: share(wgpu::BlendFactor::OneMinusSrc1),
+                    alpha: share(wgpu::BlendFactor::OneMinusSrc1Alpha),
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         multiview_mask: None,
         cache: None,
@@ -23388,6 +23595,7 @@ mod atlas_glyph_errors_tests {
                 .collect(),
             quads: Vec::new(),
             colored: false,
+            lcd: None,
             #[cfg(target_os = "macos")]
             smoothing: None,
             #[cfg(target_os = "macos")]
