@@ -172,6 +172,33 @@ fn text_at_2x_stays_plain() {
     assert_eq!(coloured(&pixels), 0);
 }
 
+/// A window on Windows presents in a single pass (a frame drawn into the
+/// drawable and the retained target at once), which LCD glyphs' dual-source
+/// blending can't write: their frames are drawn into the target and
+/// presented after, and the text shown keeps its subpixels' colours, frame
+/// after frame. (It was plain grey there: LCD text turned itself off
+/// wherever a single pass could present, every Windows window.)
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_single_pass_windows_text_takes_its_subpixels_colours() {
+    if !lcd_drawn() {
+        return;
+    }
+    let mut gpu = renderer(1., Some(LcdOrder::Rgb));
+    gpu.debug_enable_single_pass();
+    let mut s = scene(&gpu, "minimum illicit", false);
+    gpu.set_background(GROUND);
+    for text in ["minimum illicit", "illicit minimum"] {
+        let node = s.children(s.root())[0];
+        s.set_text(node, text);
+        let damage = s.flush().damage;
+        gpu.render(&mut s, &damage).unwrap();
+        let shown = gpu.debug_present_offscreen().unwrap();
+        let pixels = shown.as_chunks::<4>().0;
+        assert!(coloured(pixels) > 40, "{text:?}: {} coloured pixels shown", coloured(pixels));
+    }
+}
+
 /// Turned off, the next frame's text is grey again, and back on, coloured:
 /// each text's glyphs are keyed again, not drawn from the last setting's.
 #[cfg(not(target_os = "macos"))]

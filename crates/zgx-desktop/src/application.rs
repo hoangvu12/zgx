@@ -2223,6 +2223,10 @@ struct Host {
     theme_background: Rc<std::cell::Cell<Option<zgx::scene::Color>>>,
     applied_background: Option<zgx::scene::Color>,
     _background_effect: Option<zgx::reactive::Effect>,
+    /// A window made transparent that has dropped its glass (`set_glass`):
+    /// nothing shows through it now, so its clear colour is the theme's
+    /// background made whole (`whole_background`).
+    glass_dropped: bool,
 }
 impl Host {
     fn new(options: WindowOptions, handle: WindowHandle, windows: WindowFactory) -> Self {
@@ -2597,6 +2601,7 @@ impl Host {
             theme_background: Rc::default(),
             applied_background: None,
             _background_effect: None,
+            glass_dropped: false,
         }
     }
     fn dispatch(&mut self, event: InputEvent) -> Result<(), zgx::widgets::LayoutFeedbackError> {
@@ -3167,7 +3172,7 @@ impl Host {
             self.context.inspector.update(&self.context.ui, pointer);
         }
         self.sync_ime_cancellation();
-        if let Some(color) = self.theme_background.take()
+        if let Some(color) = self.theme_background.take().map(|c| self.whole_background(c))
             && self.applied_background != Some(color)
             && (self.renderer.is_some() || self.raster.is_some())
         {
@@ -4633,7 +4638,7 @@ impl Host {
                 renderer.set_background(zgx::scene::Color(0, 0, 0, 0));
             }
         } else {
-            let background = themes.root().color_untracked(zgx::theme::tok::BACKGROUND);
+            let background = self.whole_background(themes.root().color_untracked(zgx::theme::tok::BACKGROUND));
             if let Some(renderer) = &mut renderer {
                 renderer.set_background(background);
             }
@@ -4642,21 +4647,7 @@ impl Host {
             }
             self.applied_background = Some(background);
             self.hidden_background(&window, background);
-            if self._background_effect.is_none() {
-                // The clear colour follows the theme: the effect hands a new
-                // background to the next frame and asks for that frame.
-                let theme = themes.root().clone();
-                let pending = self.theme_background.clone();
-                let redraw = window.clone();
-                let mut first = true;
-                self._background_effect = Some(self.context.ui.runtime.effect(move || {
-                    let color = theme.color(zgx::theme::tok::BACKGROUND);
-                    if !std::mem::take(&mut first) {
-                        pending.set(Some(color));
-                        redraw.request_redraw();
-                    }
-                }));
-            }
+            self.follow_theme_background(&window);
         }
         if let Some(appearance) = window.theme() {
             themes.set_system_appearance(appearance_of(appearance));
@@ -4818,6 +4809,69 @@ impl Host {
     /// A hidden X11 window shows `color` from its mapping until its first
     /// frame after (`window_place::set_background`); shown windows, and
     /// other platforms, have nothing to do.
+    /// The clear colour follows the theme's `background`: the effect hands
+    /// a new one to the next frame and asks for that frame.
+    fn follow_theme_background(&mut self, window: &Arc<Window>) {
+        if self._background_effect.is_some() {
+            return;
+        }
+        let theme = self.context.ui.theme().root().clone();
+        let pending = self.theme_background.clone();
+        let redraw = window.clone();
+        let mut first = true;
+        self._background_effect = Some(self.context.ui.runtime.effect(move || {
+            let color = theme.color(zgx::theme::tok::BACKGROUND);
+            if !std::mem::take(&mut first) {
+                pending.set(Some(color));
+                redraw.request_redraw();
+            }
+        }));
+    }
+    /// The clear colour again once glass comes or goes (`set_glass`): none
+    /// while the window is transparent, glass among it; else the theme's
+    /// `background`, followed as it changes. A window made transparent that
+    /// drops its glass is then cleared opaque wherever its theme's
+    /// background is, and its renderer can tell (`GpuRenderer::set_lcd_text`
+    /// draws text for the screen's subpixels only into an opaque target):
+    /// it was cleared transparent whatever its glass became, its text never
+    /// drawn for an LCD screen.
+    fn background_for_glass(&mut self, window: &Arc<Window>) {
+        if self.options.is_transparent() {
+            self.glass_dropped = false;
+            self._background_effect = None;
+            self.theme_background.take();
+            self.applied_background = None;
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_background(zgx::scene::Color(0, 0, 0, 0));
+            }
+        } else {
+            self.glass_dropped = true;
+            let background = (self.context.ui.theme().root()).color_untracked(zgx::theme::tok::BACKGROUND);
+            let background = self.whole_background(background);
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_background(background);
+            }
+            if let Some(raster) = &mut self.raster {
+                raster.set_background(background);
+            }
+            self.applied_background = Some(background);
+            self.hidden_background(window, background);
+            self.follow_theme_background(window);
+        }
+        self.force = true;
+    }
+    /// `color` as the window clears to it: whole once it has dropped its
+    /// glass (a theme's background is often translucent, made for glass:
+    /// Zeron's is 80%), as it shows anyway with nothing behind it. Only
+    /// then is its target opaque to the renderer, which draws text for an
+    /// LCD screen's subpixels only into one (`GpuRenderer::set_lcd_text`).
+    fn whole_background(&self, color: zgx::scene::Color) -> zgx::scene::Color {
+        if self.glass_dropped {
+            zgx::scene::Color(color.0, color.1, color.2, 255)
+        } else {
+            color
+        }
+    }
     fn hidden_background(&self, window: &Window, color: zgx::scene::Color) {
         #[cfg(target_os = "linux")]
         if !self.state.visible && !self.frame_paced {
@@ -4913,6 +4967,8 @@ impl Host {
             }
             WindowCommand::Glass(glass) => {
                 crate::window_chrome::set_glass(window, glass);
+                let window = window.clone();
+                self.background_for_glass(&window);
                 window.request_redraw();
             }
             WindowCommand::Theme(theme) => {

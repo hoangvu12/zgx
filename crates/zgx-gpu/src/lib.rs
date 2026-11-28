@@ -6931,12 +6931,11 @@ impl GpuRenderer {
     /// The subpixel order text drawn now is drawn for (`set_lcd_text`): none
     /// where blending its channels apart wouldn't show right.
     fn lcd_now(&self) -> Option<LcdOrder> {
+        // (Presenting in a single pass too, as a window on Windows does: a
+        // frame with LCD glyphs is drawn into the target and presented after,
+        // never deferred to a pass writing two targets.)
         self.lcd.filter(|_| {
-            !self.in_layer
-                && self.scale < SHARP_TEXT_BELOW
-                && self.background.3 == 255
-                && self.single_pass_format.is_none()
-        })
+            !self.in_layer && self.scale < SHARP_TEXT_BELOW && self.background.3 == 255        })
     }
     /// The colour the target clears to where nothing is drawn.
     pub fn set_background(&mut self, color: Color) {
@@ -12533,7 +12532,9 @@ impl GpuRenderer {
             vec![0; regions.len()]
         };
         // Shader fills and image effects have no pipelines writing two
-        // targets at once.
+        // targets at once; nor have LCD glyphs, whose dual-source blending
+        // writes one target alone (`lcd_pipeline`): a frame with any is drawn
+        // into the target and presented after.
         let defer = !self.in_layer
             && self.single_pass_format.is_some()
             && !draws.iter().any(|draw| {
@@ -12544,6 +12545,7 @@ impl GpuRenderer {
                         | Shading::Blend
                         | Shading::FilterBlend(_)
                         | Shading::ImageEffect
+                        | Shading::Lcd
                 )
             })
             && (!self.present_unpremultiplies || self.background.3 == 255)
